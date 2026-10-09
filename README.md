@@ -11,7 +11,7 @@ A Claude Code mod that draws a card above the prompt:
 At the prompt of a Claude Code terminal session:
 
 ```
-/plugin install usage-hud --marketplace gmurad/usage-hud
+/plugin install usage-hud --marketplace murad-geoAi/usage-hud
 ```
 
 Answer `y` to add the marketplace, then pick the user scope so it loads in every project.
