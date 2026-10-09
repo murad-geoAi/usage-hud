@@ -9,12 +9,14 @@ import {
   borderFor,
   clockTime,
   cycle,
+  dayKey,
   donutCells,
   findModel,
   formatEta,
   modelButton,
   money,
   nextTheme,
+  pace,
   prettyModel,
   resetsIn,
   sparkline,
@@ -167,3 +169,46 @@ for (const columns of [160, 90]) {
     expect(await ui.findAll({ type: 'Raster' })).toHaveLength(3)
   })
 }
+
+test('pace forecast', () => {
+  const min = 60000
+  const now = 60 * min
+  // 10% -> 30% over the last 40 minutes: 70% left at 0.5%/min is 140 minutes
+  const rising = [{ t: now - 40 * min, pct: 10 }, { t: now, pct: 30 }]
+  expect(pace(rising, new Date(now + 300 * min).toISOString(), now)).toEqual({ text: 'limit in ~2h 20m', isRisk: true })
+  expect(pace(rising, new Date(now + 60 * min).toISOString(), now)).toEqual({ text: 'safe till reset', isRisk: false })
+  expect(pace([{ t: now, pct: 30 }], undefined, now).text).toBe('pace steady')
+  expect(pace([], undefined, now).text).toBe('pace --')
+  expect(pace([{ t: now, pct: 100 }], undefined, now).text).toBe('limit reached')
+})
+
+test('day key is the local date', () => {
+  expect(dayKey(new Date(2026, 9, 9, 23, 59).getTime())).toBe('2026-10-09')
+})
+
+test('a full context shows the compact button and the 5h line shows the pace', async ($, on) => {
+  mock.store(on)
+  mock.clock(on, { now: Date.UTC(2026, 9, 9, 12) })
+  on('session.measure', ($, e) => ({ changed: e.changed }))
+  await $.session.measure({
+    context: { window: 200000, tokens: 170000, percent: 85 },
+    rateLimits: [{ kind: 'five_hour', percentUsed: 40 }],
+    changed: ['context', 'rateLimits'],
+  })
+  const ui = await $.ui.mount({
+    plugin: 'usage-hud',
+    surface: 'terminal',
+    component: 'AbovePrompt',
+    props: {
+      hasSurvey: false,
+      isWorking: false,
+      maxRows: 20,
+      bodyColumns: 160,
+      scroll: { offset: 0, bodyRows: 20 },
+      view: {},
+    },
+  })
+  expect((await ui.find({ key: 'compact' }))?.text).toContain('compact now')
+  expect(await ui.find({ text: /pace steady/ })).toBeDefined()
+  expect(await ui.find({ text: /of 200k tokens/ })).toBeDefined()
+})

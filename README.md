@@ -3,7 +3,9 @@
 A Claude Code mod that draws a card above the prompt:
 
 - **Rings** for the 5h limit, the 7 day limit and the context window, each with % used and when it resets
-- **NOW**: model · effort · git branch, task progress with an ETA, and session cost, turns, tools, clock and uptime
+- **Pace forecast** under the 5h ring: when you hit the limit at the current pace, or "safe till reset"
+- **Compact now** under the context ring once it is 80% full
+- **NOW**: model · effort · git branch, task progress with an ETA, and session cost, turns, tools and uptime, and today's cost and turns across all sessions
 - **CONTROLS**: click to change the theme (classic, nord, mocha, claude), model, effort and permission mode
 
 ## Install

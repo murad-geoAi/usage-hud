@@ -12,6 +12,12 @@ export type ThemeName = 'classic' | 'mocha' | 'nord' | 'claude'
 
 export type EffortName = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
+/** One reading of the 5h window: when (epoch ms) and how full. */
+export type UsageSample = { t: number; pct: number }
+
+/** Cost and turns across every session of one local day. */
+export type DayTotals = { date: string; cost: number; turns: number }
+
 export type GitInfo = { branch: string; dirty: boolean }
 
 declare module 'claude-code' {
@@ -28,8 +34,11 @@ declare module 'claude-code' {
       lastMark: number
       isHidden: boolean
       theme: ThemeName
-      /** Recent 5h-window percentages, newest last. */
-      history: number[]
+      /** Recent 5h-window readings, newest last; the sparkline and the pace forecast. */
+      samples: UsageSample[]
+      today: DayTotals | null
+      /** The session cost already added to today's total. */
+      costSeen: number
       /** Context window fill, 0 to 100, or null before the first reading. */
       context: number | null
       git: GitInfo | null

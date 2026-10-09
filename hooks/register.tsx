@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { EffortName, GitInfo, Limit, ModelInfo, Tasks, ThemeName } from '../types'
+import type { DayTotals, EffortName, GitInfo, Limit, ModelInfo, Tasks, ThemeName, UsageSample } from '../types'
 
 // ---- state ------------------------------------------------------------------
 
@@ -13,7 +13,9 @@ const startedAt = atom({ plugin: 'usage-hud', key: 'startedAt' } as const, {} as
 const lastMark = atom({ plugin: 'usage-hud', key: 'lastMark' } as const, 0)
 const isHidden = atom({ plugin: 'usage-hud', key: 'isHidden' } as const, false)
 const theme = atom({ plugin: 'usage-hud', key: 'theme' } as const, 'classic' as ThemeName)
-const history = atom({ plugin: 'usage-hud', key: 'history' } as const, [] as number[])
+const samples = atom({ plugin: 'usage-hud', key: 'samples' } as const, [] as UsageSample[])
+const today = atom({ plugin: 'usage-hud', key: 'today' } as const, null as DayTotals | null)
+const costSeen = atom({ plugin: 'usage-hud', key: 'costSeen' } as const, 0)
 const context = atom({ plugin: 'usage-hud', key: 'context' } as const, null as number | null)
 const contextWindow = atom({ plugin: 'usage-hud', key: 'contextWindow' } as const, null as number | null)
 const sessionStart = atom({ plugin: 'usage-hud', key: 'sessionStart' } as const, 0)
@@ -107,6 +109,33 @@ export const resetsIn = (resetsAt: string | undefined, now: number): string => {
 }
 
 export const formatEta = (ms: number): string => `~${duration(Math.max(1, Math.round(ms / 60000)))}`
+
+/**
+ * When the 5h window runs out at the pace of the last 90 minutes, against when it resets.
+ * `isRisk` is true when the limit comes first.
+ */
+export const pace = (
+  history: readonly UsageSample[],
+  resetsAt: string | undefined,
+  now: number,
+): { text: string; isRisk: boolean } => {
+  const last = history.at(-1)
+  if (!last) return { text: 'pace --', isRisk: false }
+  if (last.pct >= 100) return { text: 'limit reached', isRisk: true }
+  const first = history.find(x => now - x.t <= 90 * 60000)
+  if (!first || first === last || last.pct <= first.pct) return { text: 'pace steady', isRisk: false }
+  const toLimit = ((100 - last.pct) * (last.t - first.t)) / (last.pct - first.pct)
+  const toReset = resetsAt ? Date.parse(resetsAt) - now : Infinity
+  return toLimit >= toReset
+    ? { text: 'safe till reset', isRisk: false }
+    : { text: `limit in ${formatEta(toLimit)}`, isRisk: true }
+}
+
+/** The local calendar day of `ms`, as YYYY-MM-DD. */
+export const dayKey = (ms: number): string => {
+  const d = new Date(ms)
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
 
 export const clockTime = (ms: number): string => {
   const d = new Date(ms)
@@ -212,6 +241,16 @@ const refreshBetweenTurns = async ($: EngineInterface) => {
   await update($, modeLabel, current => (row ? String(row.value) : current))
 }
 
+/** Adds to today's totals in the store (shared by every session), starting a new day when the date moved. */
+const addToday = async ($: EngineInterface, add: { cost?: number; turns?: number }) => {
+  const now = await $.clock.now()
+  const saved = (await $.store.get('today')) as DayTotals | undefined
+  const base = saved?.date === dayKey(now) ? saved : { date: dayKey(now), cost: 0, turns: 0 }
+  const next = { date: base.date, cost: base.cost + (add.cost ?? 0), turns: base.turns + (add.turns ?? 0) }
+  await $.store.set('today', next)
+  await update($, today, () => next)
+}
+
 // ---- settings changes (shared by the buttons and the command) --------------
 
 const setTheme = async ($: EngineInterface, name: ThemeName) => {
@@ -277,11 +316,13 @@ export const register: Register = on => {
       await update($, context, () => usage.context.percent ?? null)
       await update($, contextWindow, () => usage.context.window)
       await update($, cost, () => usage.cost?.usd ?? null)
+      await update($, costSeen, () => usage.cost?.usd ?? 0)
       await update($, sessionStart, () => usage.startedAt)
     } catch {
       // no reading yet: the rings show "no data"
     }
 
+    await addToday($, {})
     await refreshBetweenTurns($)
     return next(e)
   })
@@ -290,18 +331,30 @@ export const register: Register = on => {
     await update($, limits, () => e.rateLimits)
     await update($, context, () => e.context.percent ?? null)
     await update($, contextWindow, () => e.context.window)
-    await update($, cost, current => e.cost?.usd ?? current)
+    const usd = e.cost?.usd
+    if (usd !== undefined) {
+      const seen = await read($, costSeen)
+      await update($, cost, () => usd)
+      await update($, costSeen, () => usd)
+      if (usd > seen) await addToday($, { cost: usd - seen })
+    }
     const five = e.rateLimits.find(l => l.kind === 'five_hour')
     if (five) {
-      await update($, history, list =>
-        list.at(-1) === five.percentUsed ? list : [...list, five.percentUsed].slice(-12),
-      )
+      const sample = { t: await $.clock.now(), pct: five.percentUsed }
+      await update($, samples, list => {
+        const last = list.at(-1)
+        if (last && sample.pct < last.pct) return [sample] // the window reset: start over
+        return last?.pct === sample.pct ? list : [...list, sample].slice(-30)
+      })
     }
     return next(e)
   })
 
   on('turn.complete', async ($, e, next) => {
-    if (e.agentId === undefined) await refreshBetweenTurns($)
+    if (e.agentId === undefined) {
+      await refreshBetweenTurns($)
+      await addToday($, { turns: 1 })
+    }
     return next(e)
   })
 
@@ -419,19 +472,20 @@ export const register: Register = on => {
       read($, tasks),
       read($, durations),
       read($, theme),
-      read($, history),
+      read($, samples),
       read($, context),
       read($, contextWindow),
       read($, git),
       read($, sessionStart),
       read($, cost),
     ])
-    const [pickedModel, pickedEffort, mode, turnCount, toolCount] = await Promise.all([
+    const [pickedModel, pickedEffort, mode, turnCount, toolCount, day] = await Promise.all([
       read($, modelOverride),
       read($, effortOverride),
       read($, modeLabel),
       read($, turns),
       read($, toolCalls),
+      read($, today),
     ])
     const th = THEMES[themeName]
     // One look for every "name  value" pair: accent name padded to a column, bright value.
@@ -442,7 +496,7 @@ export const register: Register = on => {
 
     const limitRing = (label: string, kind: string) => {
       const limit = all.find(l => l.kind === kind)
-      return { label, kind, pct: limit?.percentUsed ?? null, note: resetsIn(limit?.resetsAt, now) }
+      return { label, kind, pct: limit?.percentUsed ?? null, note: resetsIn(limit?.resetsAt, now), resetsAt: limit?.resetsAt }
     }
     const rings = [
       limitRing('5h limit', 'five_hour'),
@@ -452,9 +506,12 @@ export const register: Register = on => {
         kind: 'context',
         pct: ctx,
         note: `of ${ctxWindow === null ? '--' : tokensLabel(ctxWindow)} tokens`,
+        resetsAt: undefined,
       },
     ]
     const maxPct = Math.max(0, ...all.map(l => l.percentUsed))
+    const forecast = pace(trend, rings[0]?.resetsAt, now)
+    const canCompact = ctx !== null && ctx >= 80
 
     const modelLine = [
       info ? prettyModel(info.model) : 'model unknown',
@@ -467,15 +524,21 @@ export const register: Register = on => {
       const left = t.total - t.completed
       const avg = times.length > 0 ? times.reduce((a, b) => a + b, 0) / times.length : 0
       const eta = left === 0 ? 'all tasks done' : avg === 0 ? 'estimating…' : `ETA ${formatEta(avg * left)}`
-      taskLine = `${bar(t.total === 0 ? 0 : t.completed / t.total, 6)} ${left} of ${t.total} left · ${eta}`
+      const current = t.current === null ? '' : ` · ▸ ${t.current}`
+      taskLine = `${bar(t.total === 0 ? 0 : t.completed / t.total, 6)} ${left} of ${t.total} left · ${eta}${current}`
     }
 
     const sessionLine = [
       money(spent),
       `${turnCount} ${turnCount === 1 ? 'turn' : 'turns'}`,
       `${toolCount} tools`,
-      `◷ ${clockTime(now)}`,
       ...(began > 0 ? [`⏱ ${uptime(began, now)}`] : []),
+    ].join(' · ')
+    const dayTurns = day?.turns ?? 0
+    const todayLine = [
+      money(day?.cost ?? null),
+      `${dayTurns} ${dayTurns === 1 ? 'turn' : 'turns'}`,
+      `◷ ${clockTime(now)}`,
     ].join(' · ')
 
     const controls = [
@@ -518,8 +581,27 @@ export const register: Register = on => {
                   {r.pct === null ? 'no data' : `${Math.round(r.pct)}% used`}
                 </Text>
                 <Text dimColor>{r.note}</Text>
-                {r.kind === 'five_hour' &&
-                  (trend.length > 1 ? <Text color={hex(th.ok)}>{sparkline(trend)}</Text> : <Text dimColor>trend ▁▁▁▁</Text>)}
+                {r.kind === 'five_hour' && (
+                  <Text>
+                    {trend.length > 1 && <Text color={hex(th.ok)}>{`${sparkline(trend.slice(-8).map(x => x.pct))} `}</Text>}
+                    <Text color={forecast.isRisk ? hex(th.warn) : undefined} dimColor={!forecast.isRisk}>
+                      {forecast.text}
+                    </Text>
+                  </Text>
+                )}
+                {r.kind === 'context' && canCompact && (
+                  <Button
+                    key="compact"
+                    label="Compact now"
+                    plain
+                    onPress={async () => {
+                      const result = await $.session.compact()
+                      if (result.skip !== undefined) $.ui.toast(`Not compacted: ${result.skip}`)
+                    }}
+                  >
+                    <Text bold color={hex(th.warn)}>⟳ compact now</Text>
+                  </Button>
+                )}
               </Box>
             </Box>
           ))}
@@ -531,14 +613,17 @@ export const register: Register = on => {
             {name('model', 8)}
             {value(modelLine)}
           </Text>
-          <Text>
+          <Text wrap="truncate-end">
             {name('tasks', 8)}
             {taskLine}
           </Text>
-          {t?.current != null && <Text dimColor>{`        ▸ ${t.current}`}</Text>}
           <Text>
             {name('session', 8)}
             {sessionLine}
+          </Text>
+          <Text>
+            {name('today', 8)}
+            {todayLine}
           </Text>
         </Box>
 
