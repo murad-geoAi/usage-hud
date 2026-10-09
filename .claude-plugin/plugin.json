@@ -1,0 +1,9 @@
+{
+  "name": "usage-hud",
+  "version": "0.1.0",
+  "description": "A HUD band above the prompt: 5h and 7 day limit donuts, model and effort, task progress and ETA.",
+  "author": {
+    "name": "gmurad"
+  },
+  "types": "./types/index.d.ts"
+}

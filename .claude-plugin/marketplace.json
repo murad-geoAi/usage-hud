@@ -1,0 +1,14 @@
+{
+  "name": "my-mods",
+  "description": "Personal Claude Code mods.",
+  "owner": {
+    "name": "gmurad"
+  },
+  "plugins": [
+    {
+      "name": "usage-hud",
+      "source": "./",
+      "description": "HUD band above the prompt: usage donuts, model, tasks, ETA."
+    }
+  ]
+}
