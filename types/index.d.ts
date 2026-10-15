@@ -23,9 +23,10 @@ export type GitInfo = { branch: string; dirty: boolean }
 /** Which worker CLI Claude should prefer when it delegates; not Claude's own model. */
 export type RouteName = 'auto' | 'claude' | 'codex' | 'gemini'
 
+/** `gemini` is Antigravity CLI (`agy`), which runs Gemini models. */
 export type WorkerName = 'codex' | 'gemini'
 
-/** A `codex exec` / `gemini -p` Bash call seen in flight. */
+/** A `codex exec` / `agy -p` Bash call seen in flight. */
 export type WorkerRun = { name: WorkerName; startedAt: number }
 
 /** How the last observed worker call ended, as the Bash tool reported it. */

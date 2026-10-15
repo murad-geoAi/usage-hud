@@ -120,15 +120,18 @@ export const withRoute = (text: string | undefined, r: RouteName): string => {
   return `${JSON.stringify({ ...base, preference: r }, null, 2)}\n`
 }
 
-/** The worker a Bash command starts: it must begin with `codex exec` or `gemini -p`. */
+/**
+ * The worker a Bash command starts: it must begin with `codex exec` or `agy -p`.
+ * The Gemini worker is Antigravity CLI (`agy`): Gemini CLI stopped serving personal accounts on 2026-06-18.
+ */
 export const workerOf = (command: string): WorkerName | null => {
-  const m = /^\s*(?:(codex)\s+exec\b|(gemini)\s+(?:-p|--prompt)\b)/.exec(command)
-  return m ? ((m[1] ?? m[2]) as WorkerName) : null
+  const m = /^\s*(?:(codex)\s+exec\b|(agy)\s+(?:-p|--print|--prompt)\b)/.exec(command)
+  return m ? (m[1] !== undefined ? 'codex' : 'gemini') : null
 }
 
 /** What the model reads beside each typed prompt. */
 export const routeContext = (r: RouteName): string =>
-  `[delegation-routing] preference=${r}. This is the user's routing preference for worker CLIs (Codex, Gemini), ` +
+  `[delegation-routing] preference=${r}. This is the user's routing preference for worker CLIs (Codex, Gemini via Antigravity CLI), ` +
   `set in Usage HUD. It is not Claude Code's model. Apply the delegation-orchestration rules in ~/.claude/CLAUDE.md.`
 
 // ---- formatting -------------------------------------------------------------
@@ -541,7 +544,7 @@ export const register: Register = on => {
     return next({ ...e, context: [...(e.context ?? []), routeContext(r)] })
   }).catch(($, e, next) => next(e))
 
-  // Worker activity, only where it is observable: a foreground Bash call that starts with codex exec / gemini -p.
+  // Worker activity, only where it is observable: a foreground Bash call that starts with codex exec / agy -p.
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     const name = workerOf(e.command)
     if (name === null || e.run_in_background === true) return next(e)

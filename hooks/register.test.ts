@@ -242,10 +242,14 @@ test('route preference parses, cycles and keeps other keys', () => {
 
 test('worker commands are recognised only at the start', () => {
   expect(workerOf('codex exec --sandbox read-only - < task.md')).toBe('codex')
-  expect(workerOf('  gemini -p "x" --approval-mode plan < t.md')).toBe('gemini')
-  expect(workerOf('gemini --prompt "x"')).toBe('gemini')
+  expect(workerOf('  agy -p "x" --mode plan < t.md')).toBe('gemini')
+  expect(workerOf('agy --print "x"')).toBe('gemini')
+  expect(workerOf('agy --prompt "x"')).toBe('gemini')
   expect(workerOf('codex login status')).toBe(null)
-  expect(workerOf('gemini')).toBe(null)
+  expect(workerOf('agy')).toBe(null)
+  expect(workerOf('agy models')).toBe(null)
+  // Gemini CLI no longer serves personal accounts, so it is not a worker any more
+  expect(workerOf('gemini -p "x"')).toBe(null)
   expect(workerOf('echo codex exec')).toBe(null)
   expect(workerOf('codex execute')).toBe(null)
 })
