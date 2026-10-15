@@ -20,13 +20,19 @@ export type DayTotals = { date: string; cost: number; turns: number }
 
 export type GitInfo = { branch: string; dirty: boolean }
 
-/** Which worker CLI Claude should prefer when it delegates; not Claude's own model. */
-export type RouteName = 'auto' | 'claude' | 'codex' | 'gemini'
+/** Whether Claude delegates to the Codex worker CLI, and how readily; not Claude's own model. */
+export type RouteName = 'auto' | 'claude' | 'codex'
 
-/** `gemini` is Antigravity CLI (`agy`), which runs Gemini models. */
-export type WorkerName = 'codex' | 'gemini'
+/** Codex CLI (`codex exec`) is the only worker. */
+export type WorkerName = 'codex'
 
-/** A `codex exec` / `agy -p` Bash call seen in flight. */
+/** One Codex rate-limit window: percent used and when it resets (epoch ms). */
+export type CodexWindow = { pct: number; resetsAt: number }
+
+/** Codex's own limits, from the newest ~/.codex/sessions rollout that recorded them. */
+export type CodexLimits = { fiveHour: CodexWindow | null; weekly: CodexWindow | null; seenAt: number; plan: string | null }
+
+/** A `codex exec` Bash call seen in flight. */
 export type WorkerRun = { name: WorkerName; startedAt: number }
 
 /** How the last observed worker call ended, as the Bash tool reported it. */
@@ -74,6 +80,12 @@ declare module 'claude-code' {
       worker: WorkerRun | null
       /** The last worker call that finished in this session. */
       lastWorker: WorkerDone | null
+      /** routing.json's codexModel: the model Claude passes to `codex exec -m`; null is the account default. */
+      codexModel: string | null
+      /** routing.json's codexEffort: passed as `-c model_reasoning_effort=`; null is Codex's default. */
+      codexEffort: EffortName | null
+      /** Codex's 5h and weekly limits as last read, null when none was found. */
+      codexLimits: CodexLimits | null
     }
   }
 }

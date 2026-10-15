@@ -1,6 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 
 import {
+  CODEX_MODELS,
   EFFORTS,
   MODELS,
   THEMES,
@@ -8,6 +9,8 @@ import {
   base64,
   borderFor,
   clockTime,
+  codexLine,
+  codexModelButton,
   cycle,
   dayKey,
   donutCells,
@@ -18,7 +21,9 @@ import {
   nextRoute,
   nextTheme,
   pace,
+  parseCodexLimits,
   parseRoute,
+  parseRouting,
   prettyModel,
   resetsIn,
   routeContext,
@@ -26,7 +31,8 @@ import {
   sparkline,
   tokensLabel,
   uptime,
-  withRoute,
+  windowPct,
+  withRouting,
   workerLine,
   workerOf,
 } from './register'
@@ -35,8 +41,8 @@ const HOME = 'C:\\Users\\tester'
 // as the engine hands the path to fs hooks: separators normalized
 const ROUTING = 'C:\\Users\\tester\\.claude\\delegation\\routing.json'
 
-/** An in-memory file system answering `$.fs.read` / `$.fs.write`, and a home directory. */
-const fakeFiles = (on: Parameters<typeof mock.store>[0], files: Record<string, string>) => {
+/** An in-memory file system answering `$.fs.read` / `write` / `list`, and a home directory. */
+const fakeFiles = (on: Parameters<typeof mock.store>[0], files: Record<string, string>, mtimeMs = 0) => {
   mock.env(on, { USERPROFILE: HOME })
   on('fs.read', ($, e) => {
     const text = files[e.path]
@@ -47,12 +53,32 @@ const fakeFiles = (on: Parameters<typeof mock.store>[0], files: Record<string, s
     files[e.path] = e.text
     return { value: undefined } as never
   })
+  // a directory is every path the files sit under
+  on('fs.list', ($, e) => {
+    const prefix = `${e.path.replace(/[\\/]+$/, '')}\\`
+    const names = new Map<string, 'file' | 'dir'>()
+    for (const path of Object.keys(files)) {
+      if (!path.startsWith(prefix)) continue
+      const [head, ...rest] = path.slice(prefix.length).split('\\')
+      if (head) names.set(head, rest.length > 0 ? 'dir' : 'file')
+    }
+    if (names.size === 0) throw new Error(`ENOENT: ${e.path}`)
+    const value = [...names].map(([name, kind]) => ({
+      name,
+      kind,
+      size: kind === 'file' ? (files[prefix + name] ?? '').length : 0,
+      mtimeMs: kind === 'file' ? mtimeMs : 0,
+      isLink: false,
+    }))
+    return { value } as never
+  })
   // core's answer to a prompt: what entered, the context with it
   on('prompt.submit', ($, e) => ({ text: e.text, context: e.context }))
   return files
 }
 
-const mountBand = ($: Parameters<Parameters<typeof test>[1]>[0]) =>
+type TestBody = Extract<Parameters<typeof test>[1], (...args: never[]) => unknown>
+const mountBand = ($: Parameters<TestBody>[0]) =>
   $.ui.mount({
     plugin: 'usage-hud',
     surface: 'terminal',
@@ -229,26 +255,73 @@ test('route preference parses, cycles and keeps other keys', () => {
   expect(parseRoute(undefined)).toBe('auto')
   expect(parseRoute('not json')).toBe('auto')
   expect(parseRoute('{"preference":"gpt"}')).toBe('auto')
-  expect(parseRoute('{"preference":"gemini"}')).toBe('gemini')
+  // Gemini (Antigravity) was dropped as a worker: an old file reads as auto
+  expect(parseRoute('{"preference":"gemini"}')).toBe('auto')
   expect(nextRoute('auto')).toBe('claude')
   expect(nextRoute('claude')).toBe('codex')
-  expect(nextRoute('codex')).toBe('gemini')
-  expect(nextRoute('gemini')).toBe('auto')
-  expect(JSON.parse(withRoute('{"preference":"auto","codexModel":"x"}', 'codex'))).toEqual({ preference: 'codex', codexModel: 'x' })
-  expect(JSON.parse(withRoute('[1]', 'claude'))).toEqual({ preference: 'claude' })
-  expect(routeContext('codex')).toContain('preference=codex')
-  expect(routeContext('codex')).toContain("not Claude Code's model")
+  expect(nextRoute('codex')).toBe('auto')
+  expect(JSON.parse(withRouting('{"preference":"auto","codexModel":"x"}', { preference: 'codex' }))).toEqual({
+    preference: 'codex',
+    codexModel: 'x',
+  })
+  expect(JSON.parse(withRouting('[1]', { preference: 'claude' }))).toEqual({ preference: 'claude' })
+  const ctx = routeContext({ preference: 'codex', codexModel: 'gpt-6.1-sol', codexEffort: null })
+  expect(ctx).toContain('preference=codex codexModel=gpt-6.1-sol codexEffort=default')
+  expect(ctx).toContain("not Claude Code's model")
+  expect(ctx).not.toContain('Gemini')
+})
+
+test('codex model and effort parse from routing.json', () => {
+  expect(parseRouting(undefined)).toEqual({ preference: 'auto', codexModel: null, codexEffort: null })
+  expect(parseRouting('{"codexModel":"gpt-6-astra","codexEffort":"high"}')).toEqual({
+    preference: 'auto',
+    codexModel: 'gpt-6-astra',
+    codexEffort: 'high',
+  })
+  // no shell-unsafe model names, no unknown efforts
+  expect(parseRouting('{"codexModel":"x; rm -rf /","codexEffort":"ultra-max"}')).toEqual({
+    preference: 'auto',
+    codexModel: null,
+    codexEffort: null,
+  })
+  expect(cycle(CODEX_MODELS, null)).toBe('gpt-6-astra')
+  expect(cycle(CODEX_MODELS, 'gpt-5.6-luna')).toBe(null)
+  expect(codexModelButton(null)).toBe('default')
+  expect(codexModelButton('gpt-6.1-sol')).toBe('6.1-sol')
+})
+
+// as a token_count event in a rollout carries it (resets_at in epoch seconds)
+const RATE_LINE =
+  '{"timestamp":"2026-10-13T20:16:20.924Z","type":"event_msg","payload":{"type":"token_count","rate_limits":' +
+  '{"limit_id":"codex","primary":{"used_percent":8.0,"window_minutes":300,"resets_at":1792007501},' +
+  '"secondary":{"used_percent":26.0,"window_minutes":10080,"resets_at":1792504391},"plan_type":"plus"}}}'
+
+test('codex limits come from the last rollout line that has them', () => {
+  const nullLine = '{"timestamp":"2026-10-13T21:00:00.000Z","payload":{"rate_limits":null}}'
+  const found = parseCodexLimits(`${RATE_LINE}\n${nullLine}\n{torn`, 5)
+  expect(found).toEqual({
+    fiveHour: { pct: 8, resetsAt: 1792007501000 },
+    weekly: { pct: 26, resetsAt: 1792504391000 },
+    seenAt: Date.parse('2026-10-13T20:16:20.924Z'),
+    plan: 'plus',
+  })
+  expect(parseCodexLimits(nullLine, 5)).toBe(null)
+  expect(parseCodexLimits('not json at all', 5)).toBe(null)
+  // a window past its reset is empty
+  expect(windowPct({ pct: 90, resetsAt: 1000 }, 2000)).toBe(0)
+  expect(windowPct(null, 2000)).toBe(null)
+  expect(codexLine(null, 0)).toContain('no data')
+  const line = codexLine(found, 1792000000000)
+  expect(line).toContain('5h ▱▱▱▱ 8%')
+  expect(line).toContain('wk ▰▱▱▱ 26%')
 })
 
 test('worker commands are recognised only at the start', () => {
   expect(workerOf('codex exec --sandbox read-only - < task.md')).toBe('codex')
-  expect(workerOf('  agy -p "x" --mode plan < t.md')).toBe('gemini')
-  expect(workerOf('agy --print "x"')).toBe('gemini')
-  expect(workerOf('agy --prompt "x"')).toBe('gemini')
+  expect(workerOf('  codex exec -m gpt-6.1-sol -c model_reasoning_effort=high - < t.md')).toBe('codex')
   expect(workerOf('codex login status')).toBe(null)
-  expect(workerOf('agy')).toBe(null)
-  expect(workerOf('agy models')).toBe(null)
-  // Gemini CLI no longer serves personal accounts, so it is not a worker any more
+  // Antigravity and Gemini CLI are no longer workers
+  expect(workerOf('agy -p "x"')).toBe(null)
   expect(workerOf('gemini -p "x"')).toBe(null)
   expect(workerOf('echo codex exec')).toBe(null)
   expect(workerOf('codex execute')).toBe(null)
@@ -257,7 +330,7 @@ test('worker commands are recognised only at the start', () => {
 test('worker line', () => {
   expect(workerLine(null, null)).toBe('idle')
   expect(workerLine({ name: 'codex', startedAt: new Date(2026, 0, 1, 9, 5).getTime() }, null)).toBe('codex running since 09:05')
-  expect(workerLine(null, { name: 'gemini', ms: 18000, outcome: 'ok' })).toBe('last gemini 18s · ok')
+  expect(workerLine(null, { name: 'codex', ms: 18000, outcome: 'ok' })).toBe('last codex 18s · ok')
   expect(workerLine(null, { name: 'codex', ms: 125 * 60000, outcome: 'failed' })).toBe('last codex 2h 5m · failed')
   expect(shortSpan(400)).toBe('0s')
 })
@@ -274,23 +347,64 @@ test('the Route button cycles and writes routing.json, keeping its other keys', 
   expect(JSON.parse(files[ROUTING] ?? '')).toEqual({ preference: 'claude', codexModel: null })
   await ui.press({ key: 'route' })
   expect(JSON.parse(files[ROUTING] ?? '').preference).toBe('codex')
+  await ui.press({ key: 'route' })
+  expect(JSON.parse(files[ROUTING] ?? '').preference).toBe('auto')
+})
+
+test('the Codex and Cx eff buttons cycle and write routing.json, keeping its other keys', async ($, on) => {
+  mock.store(on)
+  mock.clock(on, { now: Date.UTC(2026, 9, 9, 12) })
+  const files = fakeFiles(on, { [ROUTING]: '{"preference":"codex"}' })
+  const ui = await mountBand($)
+  expect((await ui.find({ key: 'codexModel' }))?.text).toContain('default')
+  await ui.press({ key: 'codexModel' })
+  expect((await ui.find({ key: 'codexModel' }))?.text).toContain('6-astra')
+  await ui.press({ key: 'codexModel' })
+  expect(JSON.parse(files[ROUTING] ?? '')).toEqual({ preference: 'codex', codexModel: 'gpt-6.1-sol' })
+  await ui.press({ key: 'codexEffort' })
+  expect((await ui.find({ key: 'codexEffort' }))?.text).toContain('low')
+  expect(JSON.parse(files[ROUTING] ?? '')).toEqual({ preference: 'codex', codexModel: 'gpt-6.1-sol', codexEffort: 'low' })
 })
 
 test('a typed prompt carries the preference the file holds now', async ($, on) => {
   mock.store(on)
-  const files = fakeFiles(on, { [ROUTING]: '{"preference":"gemini"}' })
+  const files = fakeFiles(on, { [ROUTING]: '{"preference":"claude"}' })
   const typed = await $.prompt.submit({ text: 'scan this repo', origin: { kind: 'composer' } } as never)
-  expect(typed.context).toEqual([routeContext('gemini')])
-  files[ROUTING] = '{"preference":"codex"}'
+  expect(typed.context).toEqual([routeContext({ preference: 'claude', codexModel: null, codexEffort: null })])
+  files[ROUTING] = '{"preference":"codex","codexEffort":"high"}'
   const again = await $.prompt.submit({ text: 'review it', origin: { kind: 'composer' } } as never)
-  expect(again.context).toEqual([routeContext('codex')])
+  expect(again.context).toEqual([routeContext({ preference: 'codex', codexModel: null, codexEffort: 'high' })])
 })
 
 test('a missing routing.json reads as auto', async ($, on) => {
   mock.store(on)
   fakeFiles(on, {})
   const typed = await $.prompt.submit({ text: 'hi', origin: { kind: 'composer' } } as never)
-  expect(typed.context).toEqual([routeContext('auto')])
+  expect(typed.context).toEqual([routeContext({ preference: 'auto', codexModel: null, codexEffort: null })])
+})
+
+test('the codex row shows the limits from the newest rollout', async ($, on) => {
+  mock.store(on)
+  mock.clock(on, { now: Date.UTC(2026, 9, 13, 21) })
+  const day = `${HOME}\\.codex\\sessions\\2026\\10\\13`
+  fakeFiles(on, {
+    [`${day}\\rollout-2026-10-13T14-50-06-a.jsonl`]: `${RATE_LINE}\n`,
+    [`${HOME}\\.codex\\sessions\\2026\\10\\12\\rollout-old.jsonl`]: 'nothing here\n',
+  })
+  // the rollouts are read between turns
+  on('session.turns', () => ({ value: 1 }) as never)
+  on('turn.complete', () => ({ text: '' }))
+  await $.turn.complete({ answer: '', reason: 'answer' } as never)
+  const ui = await mountBand($)
+  expect(await ui.find({ text: /5h ▱▱▱▱ 8% · wk ▰▱▱▱ 26%/ })).toBeDefined()
+})
+
+test('without Codex sessions the codex row says no data', async ($, on) => {
+  mock.store(on)
+  mock.clock(on, { now: Date.UTC(2026, 9, 13, 21) })
+  fakeFiles(on, {})
+  const ui = await mountBand($)
+  expect(await ui.find({ text: /no data \(use Codex/ })).toBeDefined()
 })
 
 test('day key is the local date', () => {

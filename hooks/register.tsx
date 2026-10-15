@@ -2,6 +2,8 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type {
+  CodexLimits,
+  CodexWindow,
   DayTotals,
   EffortName,
   GitInfo,
@@ -42,6 +44,9 @@ const git = atom({ plugin: 'usage-hud', key: 'git' } as const, null as GitInfo |
 const route = atom({ plugin: 'usage-hud', key: 'route' } as const, 'auto' as RouteName)
 const worker = atom({ plugin: 'usage-hud', key: 'worker' } as const, null as WorkerRun | null)
 const lastWorker = atom({ plugin: 'usage-hud', key: 'lastWorker' } as const, null as WorkerDone | null)
+const codexModel = atom({ plugin: 'usage-hud', key: 'codexModel' } as const, null as string | null)
+const codexEffort = atom({ plugin: 'usage-hud', key: 'codexEffort' } as const, null as EffortName | null)
+const codexLimits = atom({ plugin: 'usage-hud', key: 'codexLimits' } as const, null as CodexLimits | null)
 
 // ---- choices ----------------------------------------------------------------
 
@@ -90,26 +95,45 @@ export const modelButton = (id: string | null): string =>
   id === null ? 'auto' : (MODELS.find(m => m.id === id)?.label ?? id.replace(/^claude-/, ''))
 
 // ---- delegation routing -----------------------------------------------------
-// A preference for which worker CLI Claude delegates to. It never changes Claude's model.
+// Whether Claude delegates to the Codex worker CLI, and with which model and effort.
+// It never changes Claude's own model.
 
-export const ROUTES: readonly RouteName[] = ['auto', 'claude', 'codex', 'gemini']
+export const ROUTES: readonly RouteName[] = ['auto', 'claude', 'codex']
 
 export const isRoute = (x: unknown): x is RouteName => typeof x === 'string' && (ROUTES as readonly string[]).includes(x)
 
 export const nextRoute = (r: RouteName): RouteName => ROUTES[(ROUTES.indexOf(r) + 1) % ROUTES.length] ?? 'auto'
 
-/** routing.json's preference; `auto` when the file is missing, unreadable or holds something else. */
-export const parseRoute = (text: string | undefined): RouteName => {
+// The models this Codex account has run; null, the account default (gpt-6-astra here), closes the cycle.
+export const CODEX_MODELS = ['gpt-6-astra', 'gpt-6.1-sol', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'] as const
+const CODEX_MODEL_IDS: readonly string[] = CODEX_MODELS
+
+export const codexModelButton = (id: string | null): string => (id === null ? 'default' : id.replace(/^gpt-/, ''))
+
+export type Routing = { preference: RouteName; codexModel: string | null; codexEffort: EffortName | null }
+
+/** routing.json's values; a missing, unreadable or unknown value reads as auto / default. */
+export const parseRouting = (text: string | undefined): Routing => {
+  let parsed: Record<string, unknown> = {}
   try {
-    const preference = (JSON.parse(text ?? '') as { preference?: unknown } | null)?.preference
-    return isRoute(preference) ? preference : 'auto'
+    const value: unknown = JSON.parse(text ?? '')
+    if (value !== null && typeof value === 'object' && !Array.isArray(value)) parsed = value as Record<string, unknown>
   } catch {
-    return 'auto'
+    // read as all defaults
+  }
+  const { preference, codexModel: m, codexEffort: eff } = parsed
+  return {
+    preference: isRoute(preference) ? preference : 'auto',
+    // any model id Codex may know is kept, not only the listed ones
+    codexModel: typeof m === 'string' && /^[\w.-]+$/.test(m) ? m : null,
+    codexEffort: typeof eff === 'string' && isEffort(eff) ? eff : null,
   }
 }
 
-/** routing.json's text with `preference` set and every other key kept. */
-export const withRoute = (text: string | undefined, r: RouteName): string => {
+export const parseRoute = (text: string | undefined): RouteName => parseRouting(text).preference
+
+/** routing.json's text with `patch` merged in and every other key kept. */
+export const withRouting = (text: string | undefined, patch: Partial<Routing>): string => {
   let base: Record<string, unknown> = {}
   try {
     const parsed: unknown = JSON.parse(text ?? '')
@@ -117,22 +141,79 @@ export const withRoute = (text: string | undefined, r: RouteName): string => {
   } catch {
     // a broken file is replaced by a fresh one
   }
-  return `${JSON.stringify({ ...base, preference: r }, null, 2)}\n`
+  return `${JSON.stringify({ ...base, ...patch }, null, 2)}\n`
 }
 
-/**
- * The worker a Bash command starts: it must begin with `codex exec` or `agy -p`.
- * The Gemini worker is Antigravity CLI (`agy`): Gemini CLI stopped serving personal accounts on 2026-06-18.
- */
-export const workerOf = (command: string): WorkerName | null => {
-  const m = /^\s*(?:(codex)\s+exec\b|(agy)\s+(?:-p|--print|--prompt)\b)/.exec(command)
-  return m ? (m[1] !== undefined ? 'codex' : 'gemini') : null
-}
+/** The worker a Bash command starts: it must begin with `codex exec`. */
+export const workerOf = (command: string): WorkerName | null =>
+  /^\s*codex\s+exec\b/.test(command) ? 'codex' : null
 
 /** What the model reads beside each typed prompt. */
-export const routeContext = (r: RouteName): string =>
-  `[delegation-routing] preference=${r}. This is the user's routing preference for worker CLIs (Codex, Gemini via Antigravity CLI), ` +
-  `set in Usage HUD. It is not Claude Code's model. Apply the delegation-orchestration rules in ~/.claude/CLAUDE.md.`
+export const routeContext = ({ preference, codexModel: m, codexEffort: eff }: Routing): string =>
+  `[delegation-routing] preference=${preference} codexModel=${m ?? 'default'} codexEffort=${eff ?? 'default'}. ` +
+  `This is the user's routing preference for the Codex worker CLI, set in Usage HUD. It is not Claude Code's model. ` +
+  `Apply the delegation-orchestration rules in ~/.claude/CLAUDE.md.`
+
+// ---- Codex usage ------------------------------------------------------------
+// Codex records its limits in each session's rollout file. `codex exec --ephemeral` (Claude's worker
+// calls) writes none, so this is the reading of the last Codex app or CLI session.
+
+/**
+ * The last `rate_limits` with data in a rollout's text: primary is the 5h window, secondary the weekly one.
+ * `seenAt` is the line's own timestamp, else `fallbackAt` (the file's mtime).
+ */
+export const parseCodexLimits = (text: string, fallbackAt: number): CodexLimits | null => {
+  const lines = text.split('\n')
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i] ?? ''
+    if (!line.includes('"rate_limits":{')) continue
+    try {
+      const event: unknown = JSON.parse(line)
+      const found = findRateLimits(event)
+      const stamp = Date.parse(String((event as { timestamp?: unknown }).timestamp))
+      const seenAt = Number.isFinite(stamp) ? stamp : fallbackAt
+      if (!found) continue
+      const win = (w: unknown): CodexWindow | null => {
+        const x = w as { used_percent?: unknown; resets_at?: unknown } | null
+        return x && typeof x.used_percent === 'number' && typeof x.resets_at === 'number'
+          ? { pct: x.used_percent, resetsAt: x.resets_at * 1000 }
+          : null
+      }
+      const limits = { fiveHour: win(found.primary), weekly: win(found.secondary) }
+      if (limits.fiveHour === null && limits.weekly === null) continue
+      return { ...limits, seenAt, plan: typeof found.plan_type === 'string' ? found.plan_type : null }
+    } catch {
+      // a torn last line: look further up
+    }
+  }
+  return null
+}
+
+type RateLimits = { primary?: unknown; secondary?: unknown; plan_type?: unknown }
+const findRateLimits = (node: unknown): RateLimits | null => {
+  if (node === null || typeof node !== 'object') return null
+  const rl = (node as { rate_limits?: unknown }).rate_limits
+  if (rl !== null && typeof rl === 'object') return rl as RateLimits
+  for (const child of Object.values(node)) {
+    const found = findRateLimits(child)
+    if (found) return found
+  }
+  return null
+}
+
+/** Percent used now: a window whose reset has passed is empty. */
+export const windowPct = (w: CodexWindow | null, now: number): number | null =>
+  w === null ? null : w.resetsAt <= now ? 0 : w.pct
+
+/** The NOW row for Codex: both windows, and when they were read. */
+export const codexLine = (limits: CodexLimits | null, now: number): string => {
+  if (limits === null) return 'no data (use Codex once to see its limits)'
+  const part = (label: string, w: CodexWindow | null) => {
+    const pct = windowPct(w, now)
+    return pct === null ? `${label} --` : `${label} ${bar(pct / 100, 4)} ${Math.round(pct)}%`
+  }
+  return `${part('5h', limits.fiveHour)} · ${part('wk', limits.weekly)} · as of ${clockTime(limits.seenAt)}`
+}
 
 // ---- formatting -------------------------------------------------------------
 
@@ -306,10 +387,75 @@ const findModeRow = async ($: Pick<EngineInterface, 'config'>) => {
   }
 }
 
+const homeDir = async ($: EngineInterface): Promise<string | null> => {
+  const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME'))
+  return home ? home.replace(/[\\/]+$/, '') : null
+}
+
 /** ~/.claude/delegation/routing.json, shared with route.mjs and read by CLAUDE.md's rules; null without a home. */
 const routingPath = async ($: EngineInterface): Promise<string | null> => {
-  const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME'))
-  return home ? `${home.replace(/[\\/]+$/, '')}/.claude/delegation/routing.json` : null
+  const home = await homeDir($)
+  return home ? `${home}/.claude/delegation/routing.json` : null
+}
+
+const MAX_READ = 4 * 1024 * 1024 // $.fs.read rejects anything larger
+
+/** Entries of a directory, newest name first (dates sort as text); [] when it cannot be listed. */
+const listDesc = async ($: EngineInterface, path: string, kind: 'file' | 'dir') => {
+  try {
+    return (await $.fs.list(path)).filter(x => x.kind === kind).sort((a, b) => b.name.localeCompare(a.name))
+  } catch {
+    return []
+  }
+}
+
+// What each rollout held at the mtime it was read, so an unchanged file is not read again each turn.
+const rolloutCache = new Map<string, { mtimeMs: number; found: CodexLimits | null }>()
+
+/** Codex's limits from the newest rollouts under ~/.codex/sessions/<yyyy>/<mm>/<dd>/, looking back a week of folders. */
+const readCodexLimits = async ($: EngineInterface): Promise<CodexLimits | null> => {
+  const home = await homeDir($)
+  if (home === null) return null
+  const root = `${home}/.codex/sessions`
+  const days: string[] = []
+  for (const y of await listDesc($, root, 'dir')) {
+    for (const m of await listDesc($, `${root}/${y.name}`, 'dir')) {
+      for (const d of await listDesc($, `${root}/${y.name}/${m.name}`, 'dir')) {
+        days.push(`${root}/${y.name}/${m.name}/${d.name}`)
+        if (days.length >= 7) break
+      }
+      if (days.length >= 7) break
+    }
+    if (days.length >= 7) break
+  }
+  let reads = 0
+  for (const day of days) {
+    const files = (await listDesc($, day, 'file'))
+      .filter(f => /^rollout-.*\.jsonl$/.test(f.name) && f.size <= MAX_READ)
+      .sort((a, b) => b.mtimeMs - a.mtimeMs)
+    for (const f of files) {
+      if (reads++ >= 6) return null
+      const path = `${day}/${f.name}`
+      const cached = rolloutCache.get(path)
+      if (cached?.mtimeMs === f.mtimeMs) {
+        if (cached.found) return cached.found
+        continue
+      }
+      try {
+        const found = parseCodexLimits((await $.fs.read(path)) as string, f.mtimeMs)
+        rolloutCache.set(path, { mtimeMs: f.mtimeMs, found })
+        if (found) return found
+      } catch {
+        // unreadable: try the next one
+      }
+    }
+  }
+  return null
+}
+
+const refreshCodexLimits = async ($: EngineInterface) => {
+  const found = await readCodexLimits($)
+  await update($, codexLimits, current => found ?? current)
 }
 
 const readRoutingText = async ($: EngineInterface): Promise<string | undefined> => {
@@ -322,20 +468,24 @@ const readRoutingText = async ($: EngineInterface): Promise<string | undefined> 
   }
 }
 
-/** The preference as the file holds it now (route.mjs may have changed it), mirrored into state. */
-const refreshRoute = async ($: EngineInterface): Promise<RouteName> => {
-  const r = parseRoute(await readRoutingText($))
-  await update($, route, () => r)
+/** routing.json as the file holds it now (route.mjs may have changed it), mirrored into state. */
+const refreshRouting = async ($: EngineInterface): Promise<Routing> => {
+  const r = parseRouting(await readRoutingText($))
+  await update($, route, () => r.preference)
+  await update($, codexModel, () => r.codexModel)
+  await update($, codexEffort, () => r.codexEffort)
   return r
 }
 
 /** Re-reads git, the turn count, the mode and the route: things that change between turns. */
 const refreshBetweenTurns = async ($: EngineInterface) => {
+  // file reads first: a failed host read below must not leave them stale
+  await refreshRouting($).catch(() => undefined)
+  await refreshCodexLimits($).catch(() => undefined)
   const [info, count, row] = await Promise.all([readGit($), $.session.turns(), findModeRow($)])
   await update($, git, () => info)
   await update($, turns, () => count)
   await update($, modeLabel, current => (row ? String(row.value) : current))
-  await refreshRoute($).catch(() => undefined)
 }
 
 /** Adds to today's totals in the store (shared by every session), starting a new day when the date moved. */
@@ -365,20 +515,25 @@ const setEffort = async ($: EngineInterface, level: EffortName | null) => {
   await $.store.set('effortOverride', level)
 }
 
-/** Writes the preference into routing.json, keeping its other keys. */
-const setRoute = async ($: EngineInterface, r: RouteName) => {
+/** Writes `patch` into routing.json, keeping its other keys, then mirrors the file into state. */
+const setRouting = async ($: EngineInterface, patch: Partial<Routing>, what: string) => {
   const path = await routingPath($)
   if (path === null) {
-    $.ui.toast('Route not saved: no home directory found.')
+    $.ui.toast(`${what} not saved: no home directory found.`)
     return
   }
   try {
-    await $.fs.write(path, withRoute(await readRoutingText($), r))
-    await update($, route, () => r)
+    await $.fs.write(path, withRouting(await readRoutingText($), patch))
+    await refreshRouting($)
   } catch (error) {
-    $.ui.toast(`Route not saved: ${error instanceof Error ? error.message : String(error)}`)
+    $.ui.toast(`${what} not saved: ${error instanceof Error ? error.message : String(error)}`)
   }
 }
+
+const setRoute = ($: EngineInterface, r: RouteName) => setRouting($, { preference: r }, 'Route')
+const setCodexModel = ($: EngineInterface, id: string | null) => setRouting($, { codexModel: id }, 'Codex model')
+const setCodexEffort = ($: EngineInterface, level: EffortName | null) =>
+  setRouting($, { codexEffort: level }, 'Codex effort')
 
 /** Sets the mode, or the next one when `pick` is absent; answers with what happened. */
 const setMode = async ($: EngineInterface, pick?: string): Promise<string> => {
@@ -540,11 +695,11 @@ export const register: Register = on => {
     const kind = e.origin?.kind
     const isOwn = e.isMeta !== true && e.command === undefined && (kind === undefined || kind === 'composer' || kind === 'bridge' || kind === 'sdk')
     if (!isOwn) return next(e)
-    const r = await refreshRoute($)
+    const r = await refreshRouting($)
     return next({ ...e, context: [...(e.context ?? []), routeContext(r)] })
   }).catch(($, e, next) => next(e))
 
-  // Worker activity, only where it is observable: a foreground Bash call that starts with codex exec / agy -p.
+  // Worker activity, only where it is observable: a foreground Bash call that starts with codex exec.
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     const name = workerOf(e.command)
     if (name === null || e.run_in_background === true) return next(e)
@@ -559,6 +714,7 @@ export const register: Register = on => {
       return ran
     } finally {
       await update($, worker, () => null)
+      await refreshCodexLimits($).catch(() => undefined)
     }
   }).catch(($, e, next) => next(e))
 
@@ -629,6 +785,7 @@ export const register: Register = on => {
       read($, worker),
       read($, lastWorker),
     ])
+    const [cxModel, cxEffort, cxLimits] = await Promise.all([read($, codexModel), read($, codexEffort), read($, codexLimits)])
     const th = THEMES[themeName]
     // One look for every "name  value" pair: accent name padded to a column, bright value.
     const name = (text: string, width: number) => <Text color={hex(th.accent)}>{text.padEnd(width)}</Text>
@@ -651,7 +808,22 @@ export const register: Register = on => {
         resetsAt: undefined,
       },
     ]
+    // Codex's own limits get rings too where there is room beside the three Claude ones.
+    const codexRing = (label: string, kind: string, w: CodexWindow | null) => ({
+      label,
+      kind,
+      pct: windowPct(w, now),
+      note: w === null ? 'no data' : resetsIn(new Date(w.resetsAt).toISOString(), now),
+      resetsAt: undefined,
+    })
+    if (e.props.bodyColumns >= 175 && cxLimits !== null) {
+      rings.push(codexRing('codex 5h', 'codex_5h', cxLimits.fiveHour), codexRing('codex wk', 'codex_wk', cxLimits.weekly))
+    }
     const maxPct = Math.max(0, ...all.map(l => l.percentUsed))
+    // the fuller Codex window colours its row
+    const cxPcts = cxLimits === null ? [] : [windowPct(cxLimits.fiveHour, now), windowPct(cxLimits.weekly, now)]
+    const cxKnown = cxPcts.filter((p): p is number => p !== null)
+    const cxPeak = cxKnown.length === 0 ? null : Math.max(...cxKnown)
     const forecast = pace(trend, rings[0]?.resetsAt, now)
     const canCompact = ctx !== null && ctx >= 80
 
@@ -709,8 +881,16 @@ export const register: Register = on => {
           if (!result.startsWith('Mode: ')) $.ui.toast(result)
         },
       },
-      // Delegation preference for worker CLIs; Claude's own model stays the Model control's.
+      // Delegation to the Codex worker CLI; Claude's own model stays the Model control's.
       { key: 'route', name: 'Route', value: routeName, onPress: () => setRoute($, nextRoute(routeName)) },
+      {
+        key: 'codexModel',
+        name: 'Codex',
+        value: codexModelButton(cxModel),
+        // a hand-set model outside the list goes back to the default
+        onPress: () => setCodexModel($, cycle(CODEX_MODEL_IDS, cxModel)),
+      },
+      { key: 'codexEffort', name: 'Cx eff', value: cxEffort ?? 'default', onPress: () => setCodexEffort($, cycle(EFFORTS, cxEffort)) },
     ]
 
     return (
@@ -768,6 +948,15 @@ export const register: Register = on => {
               dimColor={!running && !finished}
             >
               {workerLine(running, finished)}
+            </Text>
+          </Text>
+          <Text wrap="truncate-end">
+            {name('codex', 8)}
+            <Text
+              color={cxPeak === null ? undefined : hex(fillColor(cxPeak, th))}
+              dimColor={cxLimits === null}
+            >
+              {codexLine(cxLimits, now)}
             </Text>
           </Text>
           <Text>

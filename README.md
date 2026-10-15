@@ -7,17 +7,20 @@ A Claude Code mod that draws a card above the prompt:
 - **Compact now** under the context ring once it is 80% full
 - **NOW**: model · effort · git branch, task progress with an ETA, and session cost, turns, tools and uptime, and today's cost and turns across all sessions
 - **CONTROLS**: click to change the theme (classic, nord, mocha, claude), model, effort and permission mode
-- **Route** (delegation): click to cycle the routing preference `auto → claude → codex → gemini`
-- **worker** (in NOW): a `codex exec` / `agy -p` call Claude is running now, or how the last one ended (`ok`, `failed`, `denied`)
+- **Route** (delegation to OpenAI Codex): click to cycle `auto → claude → codex`
+- **Codex** / **Cx eff**: click to pick the model and reasoning effort Claude passes to `codex exec` (`default` is your Codex account's own)
+- **worker** (in NOW): a `codex exec` call Claude is running now, or how the last one ended (`ok`, `failed`, `denied`)
+- **codex** (in NOW): your Codex 5h and weekly limits; from 175 columns also as two more rings
 
-### Route and worker
+### Route, Codex and worker
 
-Route is a *preference for which worker CLI Claude delegates to*. It does not change Claude Code's model, which stays the Model control's.
+Route is a *preference for how readily Claude hands work to the Codex CLI*. It does not change Claude Code's model, which stays the Model control's.
 
-- The value lives in `~/.claude/delegation/routing.json` (`preference`). Each typed prompt carries it to Claude as hidden context, and the rules that act on it are in `~/.claude/CLAUDE.md`.
-- `node ~/.claude/delegation/route.mjs [auto|claude|codex|gemini|status]` sets it from a terminal. The HUD picks the change up at the next prompt.
-- The worker row shows only what the Bash tool reports for foreground calls that begin with `codex exec` or `agy -p` (Antigravity CLI, shown as `gemini`). It shows no usage, quota or token figures for the workers.
-- Without `routing.json` the HUD shows `auto`, and the card works as before.
+- `auto`: Claude delegates hard reasoning, reviews and stuck debugging. `claude`: no delegation unless you ask. `codex`: heavy offload, where Codex does the planning, debugging, review and analysis, and Claude only edits, runs commands and checks.
+- The values live in `~/.claude/delegation/routing.json` (`preference`, `codexModel`, `codexEffort`). Each typed prompt carries them to Claude as hidden context, and the rules that act on them are in `~/.claude/CLAUDE.md`.
+- `node ~/.claude/delegation/route.mjs [auto|claude|codex|status]` sets the route from a terminal. The HUD picks the change up at the next prompt.
+- The codex row reads the newest `~/.codex/sessions` rollout that recorded limits, and says when that was ("as of"). Claude's own worker calls run `--ephemeral` and record none, so the reading comes from your last Codex app or CLI session.
+- Without `routing.json` the HUD shows `auto` and `default`, and the card works as before.
 
 ## Install
 
