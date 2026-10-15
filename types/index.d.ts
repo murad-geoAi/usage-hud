@@ -20,6 +20,17 @@ export type DayTotals = { date: string; cost: number; turns: number }
 
 export type GitInfo = { branch: string; dirty: boolean }
 
+/** Which worker CLI Claude should prefer when it delegates; not Claude's own model. */
+export type RouteName = 'auto' | 'claude' | 'codex' | 'gemini'
+
+export type WorkerName = 'codex' | 'gemini'
+
+/** A `codex exec` / `gemini -p` Bash call seen in flight. */
+export type WorkerRun = { name: WorkerName; startedAt: number }
+
+/** How the last observed worker call ended, as the Bash tool reported it. */
+export type WorkerDone = { name: WorkerName; ms: number; outcome: 'ok' | 'failed' | 'denied' }
+
 declare module 'claude-code' {
   interface PluginState {
     'usage-hud': {
@@ -56,6 +67,12 @@ declare module 'claude-code' {
       toolCalls: number
       /** When the session began (epoch ms), 0 before the first reading. */
       sessionStart: number
+      /** The delegation routing preference, as last read from or written to routing.json. */
+      route: RouteName
+      /** The worker call running now, null when none is seen. */
+      worker: WorkerRun | null
+      /** The last worker call that finished in this session. */
+      lastWorker: WorkerDone | null
     }
   }
 }

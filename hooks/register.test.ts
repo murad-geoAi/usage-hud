@@ -15,14 +15,57 @@ import {
   formatEta,
   modelButton,
   money,
+  nextRoute,
   nextTheme,
   pace,
+  parseRoute,
   prettyModel,
   resetsIn,
+  routeContext,
+  shortSpan,
   sparkline,
   tokensLabel,
   uptime,
+  withRoute,
+  workerLine,
+  workerOf,
 } from './register'
+
+const HOME = 'C:\\Users\\tester'
+// as the engine hands the path to fs hooks: separators normalized
+const ROUTING = 'C:\\Users\\tester\\.claude\\delegation\\routing.json'
+
+/** An in-memory file system answering `$.fs.read` / `$.fs.write`, and a home directory. */
+const fakeFiles = (on: Parameters<typeof mock.store>[0], files: Record<string, string>) => {
+  mock.env(on, { USERPROFILE: HOME })
+  on('fs.read', ($, e) => {
+    const text = files[e.path]
+    if (text === undefined) throw new Error(`ENOENT: ${e.path}`)
+    return { value: text } as never
+  })
+  on('fs.write', ($, e) => {
+    files[e.path] = e.text
+    return { value: undefined } as never
+  })
+  // core's answer to a prompt: what entered, the context with it
+  on('prompt.submit', ($, e) => ({ text: e.text, context: e.context }))
+  return files
+}
+
+const mountBand = ($: Parameters<Parameters<typeof test>[1]>[0]) =>
+  $.ui.mount({
+    plugin: 'usage-hud',
+    surface: 'terminal',
+    component: 'AbovePrompt',
+    props: {
+      hasSurvey: false,
+      isWorking: false,
+      maxRows: 20,
+      bodyColumns: 160,
+      scroll: { offset: 0, bodyRows: 20 },
+      view: {},
+    },
+  })
 
 test('base64 matches the standard encoding', () => {
   expect(base64(new Uint8Array([]))).toBe('')
@@ -180,6 +223,70 @@ test('pace forecast', () => {
   expect(pace([{ t: now, pct: 30 }], undefined, now).text).toBe('pace steady')
   expect(pace([], undefined, now).text).toBe('pace --')
   expect(pace([{ t: now, pct: 100 }], undefined, now).text).toBe('limit reached')
+})
+
+test('route preference parses, cycles and keeps other keys', () => {
+  expect(parseRoute(undefined)).toBe('auto')
+  expect(parseRoute('not json')).toBe('auto')
+  expect(parseRoute('{"preference":"gpt"}')).toBe('auto')
+  expect(parseRoute('{"preference":"gemini"}')).toBe('gemini')
+  expect(nextRoute('auto')).toBe('claude')
+  expect(nextRoute('claude')).toBe('codex')
+  expect(nextRoute('codex')).toBe('gemini')
+  expect(nextRoute('gemini')).toBe('auto')
+  expect(JSON.parse(withRoute('{"preference":"auto","codexModel":"x"}', 'codex'))).toEqual({ preference: 'codex', codexModel: 'x' })
+  expect(JSON.parse(withRoute('[1]', 'claude'))).toEqual({ preference: 'claude' })
+  expect(routeContext('codex')).toContain('preference=codex')
+  expect(routeContext('codex')).toContain("not Claude Code's model")
+})
+
+test('worker commands are recognised only at the start', () => {
+  expect(workerOf('codex exec --sandbox read-only - < task.md')).toBe('codex')
+  expect(workerOf('  gemini -p "x" --approval-mode plan < t.md')).toBe('gemini')
+  expect(workerOf('gemini --prompt "x"')).toBe('gemini')
+  expect(workerOf('codex login status')).toBe(null)
+  expect(workerOf('gemini')).toBe(null)
+  expect(workerOf('echo codex exec')).toBe(null)
+  expect(workerOf('codex execute')).toBe(null)
+})
+
+test('worker line', () => {
+  expect(workerLine(null, null)).toBe('idle')
+  expect(workerLine({ name: 'codex', startedAt: new Date(2026, 0, 1, 9, 5).getTime() }, null)).toBe('codex running since 09:05')
+  expect(workerLine(null, { name: 'gemini', ms: 18000, outcome: 'ok' })).toBe('last gemini 18s · ok')
+  expect(workerLine(null, { name: 'codex', ms: 125 * 60000, outcome: 'failed' })).toBe('last codex 2h 5m · failed')
+  expect(shortSpan(400)).toBe('0s')
+})
+
+test('the Route button cycles and writes routing.json, keeping its other keys', async ($, on) => {
+  mock.store(on)
+  mock.clock(on, { now: Date.UTC(2026, 9, 9, 12) })
+  const files = fakeFiles(on, { [ROUTING]: '{"preference":"auto","codexModel":null}' })
+  const ui = await mountBand($)
+  expect((await ui.find({ key: 'route' }))?.text).toContain('auto')
+  expect(await ui.find({ text: /idle/ })).toBeDefined()
+  await ui.press({ key: 'route' })
+  expect((await ui.find({ key: 'route' }))?.text).toContain('claude')
+  expect(JSON.parse(files[ROUTING] ?? '')).toEqual({ preference: 'claude', codexModel: null })
+  await ui.press({ key: 'route' })
+  expect(JSON.parse(files[ROUTING] ?? '').preference).toBe('codex')
+})
+
+test('a typed prompt carries the preference the file holds now', async ($, on) => {
+  mock.store(on)
+  const files = fakeFiles(on, { [ROUTING]: '{"preference":"gemini"}' })
+  const typed = await $.prompt.submit({ text: 'scan this repo', origin: { kind: 'composer' } } as never)
+  expect(typed.context).toEqual([routeContext('gemini')])
+  files[ROUTING] = '{"preference":"codex"}'
+  const again = await $.prompt.submit({ text: 'review it', origin: { kind: 'composer' } } as never)
+  expect(again.context).toEqual([routeContext('codex')])
+})
+
+test('a missing routing.json reads as auto', async ($, on) => {
+  mock.store(on)
+  fakeFiles(on, {})
+  const typed = await $.prompt.submit({ text: 'hi', origin: { kind: 'composer' } } as never)
+  expect(typed.context).toEqual([routeContext('auto')])
 })
 
 test('day key is the local date', () => {

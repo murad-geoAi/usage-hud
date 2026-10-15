@@ -1,7 +1,20 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { DayTotals, EffortName, GitInfo, Limit, ModelInfo, Tasks, ThemeName, UsageSample } from '../types'
+import type {
+  DayTotals,
+  EffortName,
+  GitInfo,
+  Limit,
+  ModelInfo,
+  RouteName,
+  Tasks,
+  ThemeName,
+  UsageSample,
+  WorkerDone,
+  WorkerName,
+  WorkerRun,
+} from '../types'
 
 // ---- state ------------------------------------------------------------------
 
@@ -26,6 +39,9 @@ const modelOverride = atom({ plugin: 'usage-hud', key: 'modelOverride' } as cons
 const effortOverride = atom({ plugin: 'usage-hud', key: 'effortOverride' } as const, null as EffortName | null)
 const modeLabel = atom({ plugin: 'usage-hud', key: 'modeLabel' } as const, null as string | null)
 const git = atom({ plugin: 'usage-hud', key: 'git' } as const, null as GitInfo | null)
+const route = atom({ plugin: 'usage-hud', key: 'route' } as const, 'auto' as RouteName)
+const worker = atom({ plugin: 'usage-hud', key: 'worker' } as const, null as WorkerRun | null)
+const lastWorker = atom({ plugin: 'usage-hud', key: 'lastWorker' } as const, null as WorkerDone | null)
 
 // ---- choices ----------------------------------------------------------------
 
@@ -73,6 +89,48 @@ export const findModel = (text: string): string | undefined => {
 export const modelButton = (id: string | null): string =>
   id === null ? 'auto' : (MODELS.find(m => m.id === id)?.label ?? id.replace(/^claude-/, ''))
 
+// ---- delegation routing -----------------------------------------------------
+// A preference for which worker CLI Claude delegates to. It never changes Claude's model.
+
+export const ROUTES: readonly RouteName[] = ['auto', 'claude', 'codex', 'gemini']
+
+export const isRoute = (x: unknown): x is RouteName => typeof x === 'string' && (ROUTES as readonly string[]).includes(x)
+
+export const nextRoute = (r: RouteName): RouteName => ROUTES[(ROUTES.indexOf(r) + 1) % ROUTES.length] ?? 'auto'
+
+/** routing.json's preference; `auto` when the file is missing, unreadable or holds something else. */
+export const parseRoute = (text: string | undefined): RouteName => {
+  try {
+    const preference = (JSON.parse(text ?? '') as { preference?: unknown } | null)?.preference
+    return isRoute(preference) ? preference : 'auto'
+  } catch {
+    return 'auto'
+  }
+}
+
+/** routing.json's text with `preference` set and every other key kept. */
+export const withRoute = (text: string | undefined, r: RouteName): string => {
+  let base: Record<string, unknown> = {}
+  try {
+    const parsed: unknown = JSON.parse(text ?? '')
+    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) base = parsed as Record<string, unknown>
+  } catch {
+    // a broken file is replaced by a fresh one
+  }
+  return `${JSON.stringify({ ...base, preference: r }, null, 2)}\n`
+}
+
+/** The worker a Bash command starts: it must begin with `codex exec` or `gemini -p`. */
+export const workerOf = (command: string): WorkerName | null => {
+  const m = /^\s*(?:(codex)\s+exec\b|(gemini)\s+(?:-p|--prompt)\b)/.exec(command)
+  return m ? ((m[1] ?? m[2]) as WorkerName) : null
+}
+
+/** What the model reads beside each typed prompt. */
+export const routeContext = (r: RouteName): string =>
+  `[delegation-routing] preference=${r}. This is the user's routing preference for worker CLIs (Codex, Gemini), ` +
+  `set in Usage HUD. It is not Claude Code's model. Apply the delegation-orchestration rules in ~/.claude/CLAUDE.md.`
+
 // ---- formatting -------------------------------------------------------------
 
 const hex = (n: number) => '#' + n.toString(16).padStart(6, '0')
@@ -109,6 +167,18 @@ export const resetsIn = (resetsAt: string | undefined, now: number): string => {
 }
 
 export const formatEta = (ms: number): string => `~${duration(Math.max(1, Math.round(ms / 60000)))}`
+
+/** A short span: "42s" under a minute, else as `duration`. */
+export const shortSpan = (ms: number): string =>
+  ms < 60000 ? `${Math.max(0, Math.round(ms / 1000))}s` : duration(Math.round(ms / 60000))
+
+/** The NOW row for workers: what is running, else how the last call ended, else idle. */
+export const workerLine = (running: WorkerRun | null, last: WorkerDone | null): string =>
+  running
+    ? `${running.name} running since ${clockTime(running.startedAt)}`
+    : last
+      ? `last ${last.name} ${shortSpan(last.ms)} · ${last.outcome}`
+      : 'idle'
 
 /**
  * When the 5h window runs out at the pace of the last 90 minutes, against when it resets.
@@ -233,12 +303,36 @@ const findModeRow = async ($: Pick<EngineInterface, 'config'>) => {
   }
 }
 
-/** Re-reads git, the turn count and the mode: things that change between turns. */
+/** ~/.claude/delegation/routing.json, shared with route.mjs and read by CLAUDE.md's rules; null without a home. */
+const routingPath = async ($: EngineInterface): Promise<string | null> => {
+  const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME'))
+  return home ? `${home.replace(/[\\/]+$/, '')}/.claude/delegation/routing.json` : null
+}
+
+const readRoutingText = async ($: EngineInterface): Promise<string | undefined> => {
+  const path = await routingPath($)
+  if (path === null) return undefined
+  try {
+    return (await $.fs.read(path)) as string
+  } catch {
+    return undefined
+  }
+}
+
+/** The preference as the file holds it now (route.mjs may have changed it), mirrored into state. */
+const refreshRoute = async ($: EngineInterface): Promise<RouteName> => {
+  const r = parseRoute(await readRoutingText($))
+  await update($, route, () => r)
+  return r
+}
+
+/** Re-reads git, the turn count, the mode and the route: things that change between turns. */
 const refreshBetweenTurns = async ($: EngineInterface) => {
   const [info, count, row] = await Promise.all([readGit($), $.session.turns(), findModeRow($)])
   await update($, git, () => info)
   await update($, turns, () => count)
   await update($, modeLabel, current => (row ? String(row.value) : current))
+  await refreshRoute($).catch(() => undefined)
 }
 
 /** Adds to today's totals in the store (shared by every session), starting a new day when the date moved. */
@@ -266,6 +360,21 @@ const setModel = async ($: EngineInterface, id: string | null) => {
 const setEffort = async ($: EngineInterface, level: EffortName | null) => {
   await update($, effortOverride, () => level)
   await $.store.set('effortOverride', level)
+}
+
+/** Writes the preference into routing.json, keeping its other keys. */
+const setRoute = async ($: EngineInterface, r: RouteName) => {
+  const path = await routingPath($)
+  if (path === null) {
+    $.ui.toast('Route not saved: no home directory found.')
+    return
+  }
+  try {
+    await $.fs.write(path, withRoute(await readRoutingText($), r))
+    await update($, route, () => r)
+  } catch (error) {
+    $.ui.toast(`Route not saved: ${error instanceof Error ? error.message : String(error)}`)
+  }
 }
 
 /** Sets the mode, or the next one when `pick` is absent; answers with what happened. */
@@ -423,6 +532,33 @@ export const register: Register = on => {
     return next(e)
   }).catch(($, e, next) => next(e))
 
+  // The user's own prompts carry the routing preference, re-read so a change from route.mjs counts at once.
+  on('prompt.submit', async ($, e, next) => {
+    const kind = e.origin?.kind
+    const isOwn = e.isMeta !== true && e.command === undefined && (kind === undefined || kind === 'composer' || kind === 'bridge' || kind === 'sdk')
+    if (!isOwn) return next(e)
+    const r = await refreshRoute($)
+    return next({ ...e, context: [...(e.context ?? []), routeContext(r)] })
+  }).catch(($, e, next) => next(e))
+
+  // Worker activity, only where it is observable: a foreground Bash call that starts with codex exec / gemini -p.
+  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+    const name = workerOf(e.command)
+    if (name === null || e.run_in_background === true) return next(e)
+
+    const startedAt = await $.clock.now()
+    await update($, worker, () => ({ name, startedAt }))
+    try {
+      const ran = await next(e)
+      const outcome = ran.deny !== undefined ? 'denied' : ran.isError === true ? 'failed' : 'ok'
+      const ms = (await $.clock.now()) - startedAt
+      await update($, lastWorker, () => ({ name, ms, outcome }))
+      return ran
+    } finally {
+      await update($, worker, () => null)
+    }
+  }).catch(($, e, next) => next(e))
+
   on('command.run', { command: 'usage-hud' }, async ($, e) => {
     const [sub, ...rest] = e.args.trim().toLowerCase().replace(/[:=]/g, ' ').split(/\s+/).filter(Boolean)
     const arg = rest.join(' ')
@@ -479,13 +615,16 @@ export const register: Register = on => {
       read($, sessionStart),
       read($, cost),
     ])
-    const [pickedModel, pickedEffort, mode, turnCount, toolCount, day] = await Promise.all([
+    const [pickedModel, pickedEffort, mode, turnCount, toolCount, day, routeName, running, finished] = await Promise.all([
       read($, modelOverride),
       read($, effortOverride),
       read($, modeLabel),
       read($, turns),
       read($, toolCalls),
       read($, today),
+      read($, route),
+      read($, worker),
+      read($, lastWorker),
     ])
     const th = THEMES[themeName]
     // One look for every "name  value" pair: accent name padded to a column, bright value.
@@ -567,6 +706,8 @@ export const register: Register = on => {
           if (!result.startsWith('Mode: ')) $.ui.toast(result)
         },
       },
+      // Delegation preference for worker CLIs; Claude's own model stays the Model control's.
+      { key: 'route', name: 'Route', value: routeName, onPress: () => setRoute($, nextRoute(routeName)) },
     ]
 
     return (
@@ -616,6 +757,15 @@ export const register: Register = on => {
           <Text wrap="truncate-end">
             {name('tasks', 8)}
             {taskLine}
+          </Text>
+          <Text wrap="truncate-end">
+            {name('worker', 8)}
+            <Text
+              color={running ? hex(th.warn) : finished && finished.outcome !== 'ok' ? hex(th.bad) : undefined}
+              dimColor={!running && !finished}
+            >
+              {workerLine(running, finished)}
+            </Text>
           </Text>
           <Text>
             {name('session', 8)}
