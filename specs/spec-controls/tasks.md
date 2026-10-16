@@ -6,7 +6,7 @@ Size: [S] one file, clear change, < ~50 lines · [M] a few files · [L] design d
 - [x] T1 [S] `hooks/spec.ts`: `parseTasks(text)` → `{ done, total, blocked, next }` (+ cases in `hooks/spec.test.ts`)
   - Done when: per R3/R2 (any indent, `[X]` too, empty file 0/0, all done → next null); next text has checkbox and size tag stripped
   - Test: `claude plugin test .`
-- [ ] T2 [S] `hooks/spec.ts`: `buildCommand(kind, feature, mode)` and `suggestMode(claude5h, codexLimits, codexInstalled)` (+ tests)
+- [x] T2 [S] `hooks/spec.ts`: `buildCommand(kind, feature, mode)` and `suggestMode(claude5h, codexLimits, codexInstalled)` (+ tests)
   - Done when: AC4 strings exact; R6 rules incl. partial unknown windows, both-high precedence, plugin unknown vs absent
   - Test: `claude plugin test .`
 - [ ] T3 [M] `hooks/spec.ts` readers + `pickFeature`; `types/index.d.ts` contract; atoms + refresh in `register.tsx`

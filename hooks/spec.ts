@@ -15,3 +15,31 @@ export const parseTasks = (text: string): TaskStats => {
   }
   return stats
 }
+
+export type BuildMode = 'split' | 'claude' | 'codex'
+export const BUILD_MODES: readonly BuildMode[] = ['split', 'claude', 'codex']
+export type SpecAction = 'spec' | 'build' | 'check' | 'resume'
+
+/** Unknown or stale stored values read as split. */
+export const asBuildMode = (x: unknown): BuildMode => (BUILD_MODES as readonly unknown[]).includes(x) ? (x as BuildMode) : 'split'
+
+/** The slash command a button puts in the prompt box; null when the action needs a feature and has none. */
+export const buildCommand = (action: SpecAction, feature: string | null, mode: BuildMode): string | null => {
+  if (action === 'spec') return '/spec '
+  if (feature === null) return null
+  if (action === 'check') return `/check ${feature}`
+  return `/${action} ${feature}${mode === 'split' ? '' : ` --${mode}`}`
+}
+
+const HIGH = 85
+
+/** A mode worth suggesting, or null. Unknown (null) windows are ignored; Codex pressure beats Claude pressure. */
+export const suggestMode = (
+  claude5h: number | null,
+  codexPcts: readonly (number | null)[],
+  codexInstalled: boolean | null,
+): BuildMode | null => {
+  if (codexInstalled === false || codexPcts.some(p => p !== null && p >= HIGH)) return 'claude'
+  if (claude5h !== null && claude5h >= HIGH) return 'codex'
+  return null
+}
