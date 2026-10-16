@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 import { loadDirect, selectEngine, runDirect } from './direct'
 import type { Engine } from './direct'
-import { BUILD_MODES, buildCommand, codexInstalledIn, pickFeature, readFeatures, specLine, suggestMode } from './spec'
+import { BUILD_MODES, asBuildMode, buildCommand, codexInstalledIn, pickFeature, readFeatures, specLine, suggestMode } from './spec'
 import type { SpecAction } from './spec'
 
 import type {
@@ -1168,7 +1168,7 @@ export const register: Register = on => {
       read($, lastWorker),
     ])
     const [cxModel, cxEffort, cxLimits, autoCfg] = await Promise.all([read($, codexModel), read($, codexEffort), read($, codexLimits), read($, autoConfig)])
-    const [specList, specPick, specModeNow, cxInstalled] = await Promise.all([read($, specFeatures), read($, specSelected), read($, specMode), read($, codexPluginInstalled)])
+    const [specList, specPick, specModeNow, cxInstalled] = await Promise.all([read($, specFeatures), read($, specSelected), read($, specMode).then(asBuildMode), read($, codexPluginInstalled)])
     const specFeature = specList.find(f => f.name === specPick)
     const activeEngine = await read($, directEngine)
     const activeStatus = await read($, directStatus)

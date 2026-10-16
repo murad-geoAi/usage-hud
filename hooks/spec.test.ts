@@ -85,7 +85,7 @@ import { specLine } from './spec'
 test('specLine shows progress, blocked and the next task', () => {
   expect(specLine({ name: 'a', done: 2, total: 5, blocked: 1, next: 'T3 c' })).toBe('a ▰▰▰▱▱▱▱▱ 2/5 · 1 blocked · next: T3 c')
   expect(specLine({ name: 'a', done: 3, total: 3, blocked: 0, next: null })).toBe('a ▰▰▰▰▰▰▰▰ 3/3 · all done')
-  expect(specLine({ name: 'a', done: 0, total: 0, blocked: 0, next: null })).toBe('a · no tasks')
+  expect(specLine({ name: 'a', done: 0, total: 0, blocked: 0, next: null })).toBe('a 0/0 · no tasks')
 })
 
 test('parseTasks strips control characters from the task text', () => {

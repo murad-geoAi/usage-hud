@@ -91,7 +91,7 @@ export const codexInstalledIn = (text: string | undefined): boolean | null => {
 
 /** "name ▰▰▱▱▱ 2/5 · 1 blocked · next: …" for the NOW column. */
 export const specLine = (f: SpecFeature): string => {
-  if (f.total === 0) return `${f.name} · no tasks`
+  if (f.total === 0) return `${f.name} 0/0 · no tasks`
   const filled = Math.round((f.done / f.total) * 8)
   const bar = '▰'.repeat(filled) + '▱'.repeat(8 - filled)
   const tail = f.next === null ? (f.done === f.total ? 'all done' : 'all blocked') : `next: ${f.next}`
