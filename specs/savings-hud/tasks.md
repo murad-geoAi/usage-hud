@@ -10,7 +10,7 @@ Size: [S] one file, clear change, < ~50 lines · [M] a few files · [L] design d
 - [x] T1 [S] `delegate.mjs`: add `task` and `session` to the ledger line; prune ledger lines older than 30 days on append (L146)
   - Done when: AC1 and AC2 hold; a line without a `[TASK]` gets `task: "unknown"`; `session` is the current session ID (omitted when unavailable, per R6a); prune keeps malformed lines out of the output only if they are unreadable
   - Test: `node --check delegate.mjs`; manual: one Codex call, inspect last line of `runs/ledger.jsonl`
-- [ ] T2 [M] `hooks/savings.ts` (new) + `hooks/savings.test.ts`: `parseLedger`, `totalsFor`, `formatTokens`, `savedLine`
+- [x] T2 [M] `hooks/savings.ts` (new) + `hooks/savings.test.ts`: `parseLedger`, `totalsFor`, `formatTokens`, `savedLine`
   - Done when: AC3, AC4, AC5 (Codex color part as a pure function); R8 `Saved: --` fallback; R10 legacy lines
   - Test: `claude plugin test .`
 - [ ] T3 [M] `hooks/register.tsx`: atom + file read on refresh (near L138 and L621-640 pattern); render segment in usage row; color Codex 5h (L353 `codexLine`, L1389-1394 row); session atom uses the HUD's own `session_id` input (fallback R6a if unavailable)
