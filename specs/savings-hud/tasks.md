@@ -16,7 +16,7 @@ Size: [S] one file, clear change, < ~50 lines · [M] a few files · [L] design d
 - [x] T3 [M] `hooks/register.tsx`: atom + file read on refresh (near L138 and L621-640 pattern); render segment in usage row; color Codex 5h (L353 `codexLine`, L1389-1394 row); session atom uses the HUD's own `session_id` input (fallback R6a if unavailable)
   - Done when: AC4/AC5 visible in the HUD; no new Claude/Codex call (R9); `register.test.ts` covers the segment
   - Test: `claude plugin test .`
-- [ ] T4 [S] `README.md`: "Savings line" section (≤ 10 lines); `install-local.mjs` only if it lists hook files
+- [x] T4 [S] `README.md`: "Savings line" section (≤ 10 lines); `install-local.mjs` only if it lists hook files
   - Done when: AC6 passes; README describes the line and the 30-day retention
   - Test: `claude plugin validate .`
 

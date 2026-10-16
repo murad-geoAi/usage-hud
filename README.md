@@ -62,6 +62,10 @@ cp codex-limits.mjs ~/.claude/delegation/codex-limits.mjs
 
 Without the helper the HUD falls back to the session logs, which can be stale; a window that has reset since the last reading is shown as unknown, not 0%. Requires Node and a logged-in Codex CLI (`codex login`).
 
+### Savings line
+
+The Codex row ends with `Saved: 12k session · 84k today · Codex 5h: 40%`: Codex tokens (input + output) that were delegated instead of run through Claude. `delegate.mjs` appends each call to `~/.claude/delegation/runs/ledger.jsonl` with its time, task (first 80 chars of `[TASK]`) and Claude Code session ID. Lines older than 30 days are dropped on each append. "Today" is local midnight to now; "session" counts lines with the current session ID, or since the HUD first rendered if no ID is available. Codex 5h turns yellow above 70% and red above 90%. With no readable ledger it shows `Saved: --`. The HUD only reads the ledger; it never changes routing or calls Codex.
+
 ### Limit-aware delegation
 
 Each prompt carries `usage claude5h=… claudeWeek=… codex5h=… codexWeek=… pressure=<low|medium|high|unknown>`. Pressure is the fuller of Claude's two windows (low under 60%, medium under 85%, high above; a missing window is unknown, never low). Rules in your `~/.claude/CLAUDE.md` can scale delegation to it. The HUD only supplies the numbers.

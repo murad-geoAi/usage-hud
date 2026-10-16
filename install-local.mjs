@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 
 const source = dirname(fileURLToPath(import.meta.url))
 const claude = join(homedir(), '.claude')
-const files = ['hooks/register.tsx', 'hooks/direct.ts', 'hooks/register.test.ts', 'hooks/direct.test.ts', 'types/index.d.ts', 'README.md', '.claude-plugin/plugin.json']
+const files = ['hooks/register.tsx', 'hooks/direct.ts', 'hooks/savings.ts', 'hooks/register.test.ts', 'hooks/direct.test.ts', 'hooks/savings.test.ts', 'types/index.d.ts', 'README.md', '.claude-plugin/plugin.json']
 const registry = JSON.parse(await readFile(join(claude, 'plugins/installed_plugins.json'), 'utf8'))
 const installs = registry.plugins?.['usage-hud@my-mods'] ?? []
 if (installs.length !== 1 || installs[0].scope !== 'user') throw new Error('Expected one user-scoped usage-hud@my-mods installation. No files were changed.')
