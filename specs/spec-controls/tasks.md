@@ -12,7 +12,7 @@ Size: [S] one file, clear change, < ~50 lines · [M] a few files · [L] design d
 - [x] T3 [M] `hooks/spec.ts` readers + `pickFeature`; `types/index.d.ts` contract; atoms + refresh in `register.tsx`
   - Done when: refresh at session start and after each turn, git branch read first; selection kept across refresh (R4 order); selected feature removed → falls back; `_template` skipped; missing `specs/` → `[]`; plugin flag `true|false|null` (malformed → null); `specMode` validated
   - Test: `claude plugin test .` + `claude plugin validate .`
-- [ ] T4 [M] `register.tsx` NOW column: Spec line (truncated next task, `all done`) + Codex warning; tests in `register.test.ts`
+- [x] T4 [M] `register.tsx` NOW column: Spec line (truncated next task, `all done`) + Codex warning; tests in `register.test.ts`
   - Done when: AC1, AC2, AC6 covered by tests
   - Test: `claude plugin test .` + `claude plugin validate .`
 - [ ] T4b [L] `register.tsx` CONTROLS: `Feat` cycle, `Build` mode cycle with hint, Spec/Build/Check/Resume buttons via `$.prompt.fill`; `isFilled: false` → warning toast; tests in `register.test.ts`

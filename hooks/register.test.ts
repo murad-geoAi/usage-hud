@@ -522,3 +522,54 @@ test('with the Codex engine the Model and Effort buttons and commands drive Code
   expect((await run('engine claude')).text).toContain('Engine: Claude')
   expect((await run('model sonnet')).text).toContain('sonnet')
 })
+
+const PLUGINS = `${HOME}\\.claude\\plugins\\installed_plugins.json`
+const PROJECT = 'C:\\proj'
+const TASKS = (n: string) => `${PROJECT}\\specs\\${n}\\tasks.md`
+
+/** A project with specs/a (2 of 5 ticked, 1 BLOCKED) and the git branch the test names. */
+const specProject = (on: Parameters<typeof mock.store>[0], plugins: string | null, branch = 'main') => {
+  mock.store(on)
+  mock.clock(on, { now: Date.UTC(2026, 9, 13, 21) })
+  const files = fakeFiles(on, {
+    [TASKS('a')]: '- [x] T1 [S] one\n- [x] T2 [S] two\n- [ ] T3 [M] three BLOCKED: err\n- [ ] T4 [L] four\n- [ ] T5 [S] five\n',
+    [TASKS('b')]: '- [ ] T1 [S] only\n',
+    [`${PROJECT}\\specs\\_template\\tasks.md`]: '- [ ] T1 [S] <task>\n',
+    ...(plugins === null ? {} : { [PLUGINS]: plugins }),
+  })
+  on('session.cwd', () => ({ value: PROJECT }) as never)
+  on('session.turns', () => ({ value: 1 }) as never)
+  on('process.run', (_$, e) => ({ value: { exitCode: 0, stdout: e.argv.includes('--abbrev-ref') ? branch : '', stderr: '' } }) as never)
+  on('turn.complete', () => ({ text: '' }))
+  return files
+}
+
+test('the spec row shows progress, blocked count and the next task; _template is skipped', async ($, on) => {
+  specProject(on, '{"plugins":{"codex@openai":[{}]}}')
+  await $.turn.complete({ answer: '', reason: 'answer' } as never)
+  const ui = await mountBand($)
+  expect(await ui.find({ text: /a ▰▰▰▱▱▱▱▱ 2\/5 · 1 blocked · next: T4 four/ })).toBeDefined()
+  expect(await ui.find({ text: /_template/ })).toBeUndefined()
+  expect(await ui.find({ text: /Codex plugin not installed/ })).toBeUndefined()
+})
+
+test('the branch picks the feature, and a missing Codex plugin warns', async ($, on) => {
+  specProject(on, '{"plugins":{"other@x":[{}]}}', 'feature/b')
+  await $.turn.complete({ answer: '', reason: 'answer' } as never)
+  const ui = await mountBand($)
+  expect(await ui.find({ text: /b ▱▱▱▱▱▱▱▱ 0\/1 · next: T1 only/ })).toBeDefined()
+  expect(await ui.find({ text: /Codex plugin not installed/ })).toBeDefined()
+})
+
+test('no specs folder or no plugin file: no spec row and no warning', async ($, on) => {
+  mock.store(on)
+  mock.clock(on, { now: Date.UTC(2026, 9, 13, 21) })
+  fakeFiles(on, {})
+  on('session.cwd', () => ({ value: PROJECT }) as never)
+  on('session.turns', () => ({ value: 1 }) as never)
+  on('turn.complete', () => ({ text: '' }))
+  await $.turn.complete({ answer: '', reason: 'answer' } as never)
+  const ui = await mountBand($)
+  expect(await ui.find({ text: /spec/ })).toBeUndefined()
+  expect(await ui.find({ text: /Codex plugin not installed/ })).toBeUndefined()
+})

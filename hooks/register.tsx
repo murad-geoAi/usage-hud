@@ -2,7 +2,8 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 import { loadDirect, selectEngine, runDirect } from './direct'
 import type { Engine } from './direct'
-import { asBuildMode, codexInstalledIn, pickFeature, readFeatures } from './spec'
+import { BUILD_MODES, buildCommand, codexInstalledIn, pickFeature, readFeatures, specLine, suggestMode } from './spec'
+import type { SpecAction } from './spec'
 
 import type {
   BuildMode,
@@ -664,9 +665,9 @@ const refreshSpecs = async ($: EngineInterface, branch: string | null) => {
   await update($, specFeatures, () => found)
   await update($, specSelected, current => pickFeature(found, current, branch))
   const home = await homeDir($)
-  const plugins = home !== null && (await $.fs.exists(`${home}/.claude/plugins/installed_plugins.json`))
-    ? ((await $.fs.read(`${home}/.claude/plugins/installed_plugins.json`)) as string)
-    : undefined
+  const plugins = home === null
+    ? undefined
+    : await ($.fs.read(`${home}/.claude/plugins/installed_plugins.json`) as Promise<string>).catch(() => undefined)
   await update($, codexPluginInstalled, () => codexInstalledIn(plugins))
 }
 
@@ -1167,6 +1168,8 @@ export const register: Register = on => {
       read($, lastWorker),
     ])
     const [cxModel, cxEffort, cxLimits, autoCfg] = await Promise.all([read($, codexModel), read($, codexEffort), read($, codexLimits), read($, autoConfig)])
+    const [specList, specPick, specModeNow, cxInstalled] = await Promise.all([read($, specFeatures), read($, specSelected), read($, specMode), read($, codexPluginInstalled)])
+    const specFeature = specList.find(f => f.name === specPick)
     const activeEngine = await read($, directEngine)
     const activeStatus = await read($, directStatus)
     const th = THEMES[themeName]
@@ -1342,6 +1345,15 @@ export const register: Register = on => {
             {name('tasks', 8)}
             {taskLine}
           </Text>
+          {specFeature && (
+            <Text wrap="truncate-end">
+              {name('spec', 8)}
+              {value(specLine(specFeature))}
+            </Text>
+          )}
+          {cxInstalled === false && (
+            <Text wrap="truncate-end" color={hex(th.warn)}>⚠ Codex plugin not installed: [S] tasks run on Claude</Text>
+          )}
           <Text wrap="truncate-end">
             {name('worker', 8)}
             <Text
