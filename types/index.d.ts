@@ -38,6 +38,12 @@ export type WorkerRun = { name: WorkerName; startedAt: number }
 /** How the last observed worker call ended, as the Bash tool reported it. */
 export type WorkerDone = { name: WorkerName; ms: number; outcome: 'ok' | 'failed' | 'denied' }
 
+/** How /build and /resume split the work: no flag, --claude or --codex. */
+export type BuildMode = 'split' | 'claude' | 'codex'
+
+/** One specs/<name>/tasks.md: ticked, all, BLOCKED counts, and the next open task. */
+export type SpecFeature = { name: string; done: number; total: number; blocked: number; next: string | null }
+
 declare module 'claude-code' {
   interface PluginState {
     'usage-hud': {
@@ -95,6 +101,13 @@ declare module 'claude-code' {
       autoOrigModel: string | null
       autoDownDisabled: boolean
       autoCompacted: boolean
+      /** Features found under specs/, refreshed between turns. */
+      specFeatures: SpecFeature[]
+      /** The feature the Spec line and the buttons act on; null when there is none. */
+      specSelected: string | null
+      specMode: BuildMode
+      /** Whether the Codex plugin is installed: null when it could not be told. */
+      codexPluginInstalled: boolean | null
     }
   }
 }

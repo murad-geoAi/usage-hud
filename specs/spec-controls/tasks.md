@@ -9,7 +9,7 @@ Size: [S] one file, clear change, < ~50 lines · [M] a few files · [L] design d
 - [x] T2 [S] `hooks/spec.ts`: `buildCommand(kind, feature, mode)` and `suggestMode(claude5h, codexLimits, codexInstalled)` (+ tests)
   - Done when: AC4 strings exact; R6 rules incl. partial unknown windows, both-high precedence, plugin unknown vs absent
   - Test: `claude plugin test .`
-- [ ] T3 [M] `hooks/spec.ts` readers + `pickFeature`; `types/index.d.ts` contract; atoms + refresh in `register.tsx`
+- [x] T3 [M] `hooks/spec.ts` readers + `pickFeature`; `types/index.d.ts` contract; atoms + refresh in `register.tsx`
   - Done when: refresh at session start and after each turn, git branch read first; selection kept across refresh (R4 order); selected feature removed → falls back; `_template` skipped; missing `specs/` → `[]`; plugin flag `true|false|null` (malformed → null); `specMode` validated
   - Test: `claude plugin test .` + `claude plugin validate .`
 - [ ] T4 [M] `register.tsx` NOW column: Spec line (truncated next task, `all done`) + Codex warning; tests in `register.test.ts`

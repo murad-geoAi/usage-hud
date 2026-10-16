@@ -42,3 +42,40 @@ test('suggestMode: per-window, unknown ignored, Codex pressure wins', () => {
   expect(suggestMode(null, [null, null], null)).toBeNull()
   expect(suggestMode(84.9, [84.9], true)).toBeNull()
 })
+
+import { codexInstalledIn, pickFeature, readFeatures } from './spec'
+
+const feat = (name: string, done: number, total: number) => ({ name, done, total, blocked: 0, next: null })
+
+test('pickFeature: keeps selection, then branch, first unfinished, first, none', () => {
+  const fs = [feat('a', 2, 2), feat('b', 0, 3), feat('c', 1, 3)]
+  expect(pickFeature(fs, 'c', 'feature/a')).toBe('c')
+  expect(pickFeature(fs, 'gone', 'feature/a')).toBe('a')
+  expect(pickFeature(fs, null, 'main')).toBe('b')
+  expect(pickFeature([feat('a', 2, 2)], null, null)).toBe('a')
+  expect(pickFeature([], 'a', 'feature/a')).toBeNull()
+})
+
+test('readFeatures skips _template, sorts, tolerates missing specs and tasks.md', async () => {
+  const files: Record<string, string> = { 'D:/p/specs/b/tasks.md': '- [x] T1 a\n- [ ] T2 b\n', 'D:/p/specs/a/tasks.md': '- [ ] T1 x BLOCKED\n' }
+  const $: any = {
+    fs: {
+      list: async (p: string) => {
+        if (p !== 'D:/p/specs') throw new Error('ENOENT')
+        return [{ name: 'b', kind: 'dir' }, { name: '_template', kind: 'dir' }, { name: 'c', kind: 'dir' }, { name: 'a', kind: 'dir' }, { name: 'f.md', kind: 'file' }]
+      },
+      read: async (p: string) => { if (p in files) return files[p]; throw new Error('ENOENT') },
+    },
+  }
+  expect((await readFeatures($, 'D:\\p')).map(f => f.name)).toEqual(['a', 'b'])
+  expect((await readFeatures($, 'D:/p'))[1]).toEqual({ name: 'b', done: 1, total: 2, blocked: 0, next: 'T2 b' })
+  expect(await readFeatures($, 'D:/none')).toEqual([])
+})
+
+test('codexInstalledIn: absent only when the file parses', () => {
+  expect(codexInstalledIn('{"plugins":{"codex@openai":[{}],"x@y":[]}}')).toBe(true)
+  expect(codexInstalledIn('{"plugins":{"x@y":[]}}')).toBe(false)
+  expect(codexInstalledIn('{oops')).toBeNull()
+  expect(codexInstalledIn(undefined)).toBeNull()
+  expect(codexInstalledIn('{"plugins":[]}')).toBeNull()
+})

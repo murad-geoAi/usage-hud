@@ -1,3 +1,6 @@
+import type { EngineInterface } from 'claude-code'
+import type { BuildMode, SpecFeature } from '../types'
+
 export type TaskStats = { done: number; total: number; blocked: number; next: string | null }
 
 const TASK_LINE = /^\s*[-*]\s+\[([ xX])\]\s+(.*)$/
@@ -16,7 +19,6 @@ export const parseTasks = (text: string): TaskStats => {
   return stats
 }
 
-export type BuildMode = 'split' | 'claude' | 'codex'
 export const BUILD_MODES: readonly BuildMode[] = ['split', 'claude', 'codex']
 export type SpecAction = 'spec' | 'build' | 'check' | 'resume'
 
@@ -42,4 +44,41 @@ export const suggestMode = (
   if (codexInstalled === false || codexPcts.some(p => p !== null && p >= HIGH)) return 'claude'
   if (claude5h !== null && claude5h >= HIGH) return 'codex'
   return null
+}
+
+/** Keeps the current selection if it still exists; else the feature on the git branch, the first unfinished, the first, none. */
+export const pickFeature = (features: readonly SpecFeature[], current: string | null, branch: string | null): string | null => {
+  if (current !== null && features.some(f => f.name === current)) return current
+  const onBranch = branch?.startsWith('feature/') ? branch.slice('feature/'.length) : null
+  if (onBranch !== null && features.some(f => f.name === onBranch)) return onBranch
+  return (features.find(f => f.done < f.total) ?? features[0])?.name ?? null
+}
+
+/** Every specs/<name>/tasks.md under cwd except _template, sorted by name; [] when there is no specs folder. */
+export async function readFeatures($: EngineInterface, cwd: string): Promise<SpecFeature[]> {
+  const root = `${cwd.replace(/\\/g, '/').replace(/\/+$/, '')}/specs`
+  let dirs: string[]
+  try {
+    dirs = (await $.fs.list(root)).filter(x => x.kind === 'dir' && x.name !== '_template').map(x => x.name).sort()
+  } catch {
+    return []
+  }
+  const found: SpecFeature[] = []
+  for (const name of dirs) {
+    try {
+      found.push({ name, ...parseTasks((await $.fs.read(`${root}/${name}/tasks.md`)) as string) })
+    } catch { /* no tasks.md yet */ }
+  }
+  return found
+}
+
+/** True/false only when installed_plugins.json parses and lists plugins; null (unknown) otherwise. */
+export const codexInstalledIn = (text: string | undefined): boolean | null => {
+  try {
+    const plugins = (JSON.parse(text ?? '') as { plugins?: unknown }).plugins
+    if (plugins === null || typeof plugins !== 'object' || Array.isArray(plugins)) return null
+    return Object.keys(plugins).some(k => k.startsWith('codex@'))
+  } catch {
+    return null
+  }
 }

@@ -2,8 +2,10 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 import { loadDirect, selectEngine, runDirect } from './direct'
 import type { Engine } from './direct'
+import { asBuildMode, codexInstalledIn, pickFeature, readFeatures } from './spec'
 
 import type {
+  BuildMode,
   CodexLimits,
   CodexWindow,
   DayTotals,
@@ -12,6 +14,7 @@ import type {
   Limit,
   ModelInfo,
   RouteName,
+  SpecFeature,
   Tasks,
   ThemeName,
   UsageSample,
@@ -21,6 +24,10 @@ import type {
 } from '../types'
 
 let directBusy = false
+const specFeatures = atom({ plugin: 'usage-hud', key: 'specFeatures' } as const, [] as SpecFeature[])
+const specSelected = atom({ plugin: 'usage-hud', key: 'specSelected' } as const, null as string | null)
+const specMode = atom({ plugin: 'usage-hud', key: 'specMode' } as const, 'split' as BuildMode)
+const codexPluginInstalled = atom({ plugin: 'usage-hud', key: 'codexPluginInstalled' } as const, null as boolean | null)
 const directEngine = atom({ plugin: 'usage-hud', key: 'directEngine' } as const, 'claude' as Engine)
 const directStatus = atom({ plugin: 'usage-hud', key: 'directStatus' } as const, '' as string)
 
@@ -651,6 +658,18 @@ const refreshRouting = async ($: EngineInterface): Promise<Routing> => {
   return r
 }
 
+/** The specs folder's tasks.md files, the selected feature (kept if it still exists) and whether the Codex plugin is installed. */
+const refreshSpecs = async ($: EngineInterface, branch: string | null) => {
+  const found = await readFeatures($, await $.session.cwd())
+  await update($, specFeatures, () => found)
+  await update($, specSelected, current => pickFeature(found, current, branch))
+  const home = await homeDir($)
+  const plugins = home !== null && (await $.fs.exists(`${home}/.claude/plugins/installed_plugins.json`))
+    ? ((await $.fs.read(`${home}/.claude/plugins/installed_plugins.json`)) as string)
+    : undefined
+  await update($, codexPluginInstalled, () => codexInstalledIn(plugins))
+}
+
 /** Re-reads git, the turn count, the mode and the route: things that change between turns. */
 const refreshBetweenTurns = async ($: EngineInterface) => {
   // file reads first: a failed host read below must not leave them stale
@@ -658,6 +677,7 @@ const refreshBetweenTurns = async ($: EngineInterface) => {
   await refreshCodexLimits($).catch(() => undefined)
   const [info, count, row] = await Promise.all([readGit($), $.session.turns(), findModeRow($)])
   await update($, git, () => info)
+  await refreshSpecs($, info?.branch ?? null).catch(() => undefined)
   await update($, turns, () => count)
   await update($, modeLabel, current => (row ? String(row.value) : current))
 }
