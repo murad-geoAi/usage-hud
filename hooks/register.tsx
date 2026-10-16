@@ -1241,6 +1241,19 @@ export const register: Register = on => {
       `◷ ${clockTime(now)}`,
     ].join(' · ')
 
+    const claude5h = all.find(l => l.kind === 'five_hour')
+    const buildHint = suggestMode(
+      claude5h === undefined ? null : limitPct(claude5h, now),
+      cxLimits === null ? [] : [windowPct(cxLimits.fiveHour, now), windowPct(cxLimits.weekly, now)],
+      cxInstalled,
+    )
+    // puts the command in the prompt box; never sends it
+    const fillCommand = async (action: SpecAction) => {
+      const text = buildCommand(action, specPick, specModeNow)
+      if (text === null) return void $.ui.toast('No feature in specs/')
+      const filled = await $.prompt.fill({ text, mode: 'replace' })
+      if (!filled.isFilled) $.ui.toast('Could not fill the prompt (dialog open?)')
+    }
     const controls = [
       { key: 'engine', name: 'Engine', value: activeEngine, onPress: async () => {
         $.ui.toast(await switchEngine($, activeEngine === 'claude' ? 'codex' : 'claude', true))
@@ -1286,6 +1299,15 @@ export const register: Register = on => {
         },
         { key: 'codexEffort', name: 'Cx eff', value: cxEffort ?? 'default', onPress: () => setCodexEffort($, cycle(EFFORTS, cxEffort)) },
       ]),
+      // Which feature the buttons below act on, and the flag /build and /resume get.
+      { key: 'feat', name: 'Feat', value: specPick ?? 'none',
+        onPress: () => {
+          const names = specList.map(f => f.name)
+          if (names.length > 0) void update($, specSelected, () => names[(names.indexOf(specPick ?? '') + 1) % names.length] ?? null)
+        } },
+      { key: 'buildMode', name: 'Build', value: buildHint !== null && buildHint !== specModeNow ? `${specModeNow} (try ${buildHint})` : specModeNow,
+        warn: buildHint !== null && buildHint !== specModeNow,
+        onPress: () => void update($, specMode, () => BUILD_MODES[(BUILD_MODES.indexOf(specModeNow) + 1) % BUILD_MODES.length] ?? 'split') },
       { key: 'autopilot', name: 'Auto', value: isAutoOn(autoCfg) ? '✦ on' : 'off',
         onPress: async () => {
           const isOn = isAutoOn(autoCfg)
@@ -1388,10 +1410,19 @@ export const register: Register = on => {
             <Box key={c.key} marginRight={isWide ? 0 : 1}>
               <Button key={c.key} label={`${c.name}: ${c.value}`} plain onPress={c.onPress}>
                 {name(c.name, 7)}
-                {value(c.value)}
+                {'warn' in c && c.warn ? <Text bold color={hex(th.warn)}>{c.value}</Text> : value(c.value)}
               </Button>
             </Box>
           ))}
+          <Box marginRight={isWide ? 0 : 1}>
+            {(['spec', 'build', 'check', 'resume'] as const).map(a => (
+              <Box key={`fill-${a}`} marginRight={1}>
+                <Button key={`fill-${a}`} label={`fill /${a}`} plain onPress={() => fillCommand(a)}>
+                  <Text bold color={hex(th.accent)}>{`/${a}`}</Text>
+                </Button>
+              </Box>
+            ))}
+          </Box>
         </Box>
       </Box>
     )

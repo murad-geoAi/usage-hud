@@ -3,6 +3,12 @@ import type { BuildMode, SpecFeature } from '../types'
 
 export type TaskStats = { done: number; total: number; blocked: number; next: string | null }
 
+/** Text from a repo file is drawn and filled into the prompt: drop control characters (terminal escapes). */
+const clean = (text: string): string => text.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').replace(/\s+/g, ' ').trim()
+
+/** Feature folders become part of a slash command: plain names only. */
+const SAFE_NAME = /^[\w.-]+$/
+
 const TASK_LINE = /^\s*[-*]\s+\[([ xX])\]\s+(.*)$/
 
 /** Counts the checkbox lines of a tasks.md; next is the first unticked, non-blocked task without its tag. */
@@ -14,7 +20,7 @@ export const parseTasks = (text: string): TaskStats => {
     stats.total++
     if (m[1] !== ' ') { stats.done++; continue }
     if (m[2].includes('BLOCKED')) { stats.blocked++; continue }
-    if (stats.next === null) stats.next = m[2].replace(/\s*\[[SML]\]\s*/, ' ').replace(/\s+/g, ' ').trim()
+    if (stats.next === null) stats.next = clean(m[2].replace(/\s*\[[SML]\]\s*/, ' '))
   }
   return stats
 }
@@ -59,7 +65,7 @@ export async function readFeatures($: EngineInterface, cwd: string): Promise<Spe
   const root = `${cwd.replace(/\\/g, '/').replace(/\/+$/, '')}/specs`
   let dirs: string[]
   try {
-    dirs = (await $.fs.list(root)).filter(x => x.kind === 'dir' && x.name !== '_template').map(x => x.name).sort()
+    dirs = (await $.fs.list(root)).filter(x => x.kind === 'dir' && x.name !== '_template' && SAFE_NAME.test(x.name)).map(x => x.name).sort()
   } catch {
     return []
   }

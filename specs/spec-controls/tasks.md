@@ -15,7 +15,7 @@ Size: [S] one file, clear change, < ~50 lines · [M] a few files · [L] design d
 - [x] T4 [M] `register.tsx` NOW column: Spec line (truncated next task, `all done`) + Codex warning; tests in `register.test.ts`
   - Done when: AC1, AC2, AC6 covered by tests
   - Test: `claude plugin test .` + `claude plugin validate .`
-- [ ] T4b [L] `register.tsx` CONTROLS: `Feat` cycle, `Build` mode cycle with hint, Spec/Build/Check/Resume buttons via `$.prompt.fill`; `isFilled: false` → warning toast; tests in `register.test.ts`
+- [x] T4b [L] `register.tsx` CONTROLS: `Feat` cycle, `Build` mode cycle with hint, Spec/Build/Check/Resume buttons via `$.prompt.fill`; `isFilled: false` → warning toast; tests in `register.test.ts`
   - Done when: AC4, AC5 covered; fill-failure path tested; mode persists across re-render
   - Test: `claude plugin test .` + `claude plugin validate .`
 - [ ] T5 [S] `README.md`: "Spec workflow controls" section (≤ 10 lines)

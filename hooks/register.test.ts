@@ -570,6 +570,67 @@ test('no specs folder or no plugin file: no spec row and no warning', async ($, 
   on('turn.complete', () => ({ text: '' }))
   await $.turn.complete({ answer: '', reason: 'answer' } as never)
   const ui = await mountBand($)
-  expect(await ui.find({ text: /spec/ })).toBeUndefined()
+  expect(await ui.find({ text: /^spec {2,}/ })).toBeUndefined()
   expect(await ui.find({ text: /Codex plugin not installed/ })).toBeUndefined()
+})
+
+/** Answers the prompt box: records each fill and reports whether the box took it. */
+const fakePrompt = (on: Parameters<typeof mock.store>[0], isFilled = true) => {
+  const filled: string[] = []
+  on('prompt.fill', (_$, e) => {
+    filled.push(e.text)
+    return { isFilled } as never
+  })
+  return filled
+}
+
+test('Feat cycles the features and the buttons fill the command for the selected one', async ($, on) => {
+  specProject(on, '{"plugins":{"codex@openai":[{}]}}')
+  const filled = fakePrompt(on)
+  await $.turn.complete({ answer: '', reason: 'answer' } as never)
+  const ui = await mountBand($)
+  expect((await ui.find({ key: 'feat' }))?.text).toContain('a')
+  await ui.press({ key: 'feat' })
+  expect((await ui.find({ key: 'feat' }))?.text).toContain('b')
+  await ui.press({ key: 'feat' })
+  expect((await ui.find({ key: 'feat' }))?.text).toContain('a')
+  for (const a of ['spec', 'build', 'check', 'resume']) await ui.press({ key: `fill-${a}` })
+  expect(filled).toEqual(['/spec ', '/build a', '/check a', '/resume a'])
+})
+
+test('Build cycles split, claude, codex and the flag follows it', async ($, on) => {
+  specProject(on, '{"plugins":{"codex@openai":[{}]}}')
+  const filled = fakePrompt(on)
+  await $.turn.complete({ answer: '', reason: 'answer' } as never)
+  const ui = await mountBand($)
+  expect((await ui.find({ key: 'buildMode' }))?.text).toContain('split')
+  await ui.press({ key: 'buildMode' })
+  await ui.press({ key: 'fill-build' })
+  await ui.press({ key: 'buildMode' })
+  await ui.press({ key: 'fill-resume' })
+  expect(filled).toEqual(['/build a --claude', '/resume a --codex'])
+  await ui.press({ key: 'buildMode' })
+  expect((await ui.find({ key: 'buildMode' }))?.text).toContain('split')
+})
+
+test('Build suggests claude when the Codex plugin is missing, and stops once it matches', async ($, on) => {
+  specProject(on, '{"plugins":{"other@x":[{}]}}')
+  fakePrompt(on)
+  await $.turn.complete({ answer: '', reason: 'answer' } as never)
+  const ui = await mountBand($)
+  expect((await ui.find({ key: 'buildMode' }))?.text).toContain('split (try claude)')
+  await ui.press({ key: 'buildMode' })
+  expect((await ui.find({ key: 'buildMode' }))?.text).not.toContain('try')
+})
+
+test('a refused fill and a project without specs both say so and send nothing', async ($, on) => {
+  specProject(on, null)
+  const toasts: string[] = []
+  on('ui.toast', (_$, e) => { toasts.push(e.text); return { value: undefined } as never })
+  const filled = fakePrompt(on, false)
+  await $.turn.complete({ answer: '', reason: 'answer' } as never)
+  const ui = await mountBand($)
+  await ui.press({ key: 'fill-build' })
+  expect(filled).toEqual(['/build a'])
+  expect(toasts.some(t => /Could not fill the prompt/.test(t))).toBe(true)
 })

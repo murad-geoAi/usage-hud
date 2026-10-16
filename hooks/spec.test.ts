@@ -87,3 +87,7 @@ test('specLine shows progress, blocked and the next task', () => {
   expect(specLine({ name: 'a', done: 3, total: 3, blocked: 0, next: null })).toBe('a ▰▰▰▰▰▰▰▰ 3/3 · all done')
   expect(specLine({ name: 'a', done: 0, total: 0, blocked: 0, next: null })).toBe('a · no tasks')
 })
+
+test('parseTasks strips control characters from the task text', () => {
+  expect(parseTasks('- [ ] T1 [S] a\u001b[31mred\u0007b\n').next).toBe('T1 a [31mred b')
+})
