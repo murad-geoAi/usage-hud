@@ -1,7 +1,7 @@
 ---
 description: Show a 3-line status for a feature and continue /build from the first unticked task
 argument-hint: <feature-name> [--claude | --codex]
-model: sonnet
+model: opus
 ---
 
 Feature: $ARGUMENTS

@@ -8,10 +8,13 @@ import {
   bar,
   base64,
   borderFor,
+  burnRate,
   clockTime,
   codexLine,
   codexModelButton,
+  contextNote,
   cycle,
+  dayTime,
   dayKey,
   donutCells,
   findModel,
@@ -34,6 +37,7 @@ import {
   sparkline,
   tokensLabel,
   uptime,
+  windowPace,
   windowPct,
   withRouting,
   workerLine,
@@ -197,7 +201,9 @@ test('model and effort cycling', () => {
   const ids = MODELS.map(m => m.id)
   expect(cycle(ids, null)).toBe('claude-opus-5-5')
   expect(cycle(ids, 'claude-opus-5-5')).toBe('claude-sonnet-5-5')
-  expect(cycle(ids, 'claude-fable-5-1')).toBe(null)
+  // haiku closes the cycle: Fable is not offered
+  expect(cycle(ids, 'claude-haiku-5-5')).toBe(null)
+  expect(findModel('fable')).toBe(undefined)
   expect(cycle(EFFORTS, 'max')).toBe(null)
   expect(cycle(EFFORTS, null)).toBe('low')
   expect(findModel('opus')).toBe('claude-opus-5-5')
@@ -382,7 +388,6 @@ test('the Route button cycles and writes routing.json, keeping its other keys', 
   const files = fakeFiles(on, { [ROUTING]: '{"preference":"auto","codexModel":null}' })
   const ui = await mountBand($)
   expect((await ui.find({ key: 'route' }))?.text).toContain('auto')
-  expect(await ui.find({ text: /idle/ })).toBeDefined()
   await ui.press({ key: 'route' })
   expect((await ui.find({ key: 'route' }))?.text).toContain('claude')
   expect(JSON.parse(files[ROUTING] ?? '')).toEqual({ preference: 'claude', codexModel: null })
@@ -392,19 +397,18 @@ test('the Route button cycles and writes routing.json, keeping its other keys', 
   expect(JSON.parse(files[ROUTING] ?? '').preference).toBe('auto')
 })
 
-test('the Codex and Cx eff buttons cycle and write routing.json, keeping its other keys', async ($, on) => {
+test('/usage-hud codex sets the delegation model and effort in routing.json, keeping its other keys', async ($, on) => {
   mock.store(on)
-  mock.clock(on, { now: Date.UTC(2026, 9, 9, 12) })
+  on('config.list', () => ({ value: [] }))
   const files = fakeFiles(on, { [ROUTING]: '{"preference":"codex"}' })
-  const ui = await mountBand($)
-  expect((await ui.find({ key: 'codexModel' }))?.text).toContain('default')
-  await ui.press({ key: 'codexModel' })
-  expect((await ui.find({ key: 'codexModel' }))?.text).toContain('6-astra')
-  await ui.press({ key: 'codexModel' })
-  expect(JSON.parse(files[ROUTING] ?? '')).toEqual({ preference: 'codex', codexModel: 'gpt-6.1-sol' })
-  await ui.press({ key: 'codexEffort' })
-  expect((await ui.find({ key: 'codexEffort' }))?.text).toContain('low')
-  expect(JSON.parse(files[ROUTING] ?? '')).toEqual({ preference: 'codex', codexModel: 'gpt-6.1-sol', codexEffort: 'low' })
+  const run = (args: string) => $.command.run({ command: 'usage-hud', args, origin: { kind: 'composer' }, presentation: { layout: 'main', columns: 120 } } as never)
+  expect((await run('codex terra')).text).toContain('gpt-5.6-terra')
+  expect((await run('codex low')).text).toContain('low')
+  expect(JSON.parse(files[ROUTING] ?? '')).toEqual({ preference: 'codex', codexModel: 'gpt-5.6-terra', codexEffort: 'low' })
+  expect((await run('codex default')).text).toContain('account default')
+  // the Model command is Claude's own again
+  expect((await run('model sonnet')).text).toContain('sonnet')
+  expect(JSON.parse(files[ROUTING] ?? '').codexModel).toBe(null)
 })
 
 test('a typed prompt carries the preference the file holds now', async ($, on) => {
@@ -476,48 +480,84 @@ test('a full context shows the compact button and the 5h line shows the pace', a
   })
   expect((await ui.find({ key: 'compact' }))?.text).toContain('compact now')
   expect(await ui.find({ text: /pace steady/ })).toBeDefined()
-  expect(await ui.find({ text: /of 200k tokens/ })).toBeDefined()
+  expect(await ui.find({ text: /170k of 200k/ })).toBeDefined()
 })
 
 
-test('prompts stay with Claude even when the engine is set to Codex', async ($, on) => {
-  mock.store(on)
-  mock.env(on, {})
-  on('config.list', () => ({ value: [] }))
-  on('session.id', () => ({ value: 'direct-test-session' }))
-  on('session.cwd', () => ({ value: 'D:/project' }))
-  on('session.messages', () => ({ value: { deny: 'Context temporarily unavailable' } }))
-  let claudeCalls = 0
-  on('prompt.submit', ($, e) => { claudeCalls++; return { text: e.text } })
-  const run = (args: string) => $.command.run({ command: 'usage-hud', args, origin: { kind: 'composer' }, presentation: { layout: 'main', columns: 120 } })
-  expect((await run('engine codex')).text).toContain('Engine: Codex')
-  const result = await $.prompt.submit({ text: 'Continue my task.', asUser: true })
-  expect(result.drop).toBeUndefined()
-  expect(claudeCalls).toBe(1)
-})
-
-test('with the Codex engine the Model and Effort buttons and commands drive Codex', async ($, on) => {
+test('there is no engine switch: the command says so and prompts reach Claude', async ($, on) => {
   mock.store(on)
   mock.clock(on, { now: Date.UTC(2026, 9, 9, 12) })
   on('config.list', () => ({ value: [] }))
-  on('session.id', () => ({ value: 'switch-session' }))
-  on('session.cwd', () => ({ value: 'D:/project' }))
-  const files = fakeFiles(on, { [ROUTING]: '{"preference":"claude"}' })
+  fakeFiles(on, {})
   const run = (args: string) => $.command.run({ command: 'usage-hud', args, origin: { kind: 'composer' }, presentation: { layout: 'main', columns: 120 } } as never)
-  expect((await run('engine codex')).text).toContain('Engine: Codex')
+  expect((await run('engine codex')).text).toContain('removed')
+  const result = await $.prompt.submit({ text: 'Continue my task.', origin: { kind: 'composer' } } as never)
+  expect(result.drop).toBeUndefined()
+  expect(result.text).toBe('Continue my task.')
   const ui = await mountBand($)
-  await ui.press({ key: 'model' })
-  expect(JSON.parse(files[ROUTING] ?? '').codexModel).toBe('gpt-6-astra')
-  await ui.press({ key: 'effort' })
-  expect(JSON.parse(files[ROUTING] ?? '').codexEffort).toBe('low')
-  expect((await run('model terra')).text).toContain('gpt-5.6-terra')
-  expect(JSON.parse(files[ROUTING] ?? '').codexModel).toBe('gpt-5.6-terra')
-  expect((await run('codex 5.6-luna')).text).toContain('gpt-5.6-luna')
-  expect((await run('codex high')).text).toContain('high')
-  expect(JSON.parse(files[ROUTING] ?? '')).toMatchObject({ preference: 'claude', codexModel: 'gpt-5.6-luna', codexEffort: 'high' })
-  expect((await run('codex default')).text).toContain('account default')
-  expect((await run('engine claude')).text).toContain('Engine: Claude')
-  expect((await run('model sonnet')).text).toContain('sonnet')
+  expect(await ui.find({ key: 'engine' })).toBeUndefined()
+  expect(await ui.find({ key: 'codexModel' })).toBeUndefined()
+})
+
+test('the Auto button toggles downgrade and compact, and an old saved config loses its engine keys', async ($, on) => {
+  mock.store(on, { autoConfig: { switchThreshold: 50, downgradeEnabled: false, compactThreshold: 90, fallbackEnabled: true } })
+  mock.clock(on, { now: Date.UTC(2026, 9, 9, 12) })
+  on('config.list', () => ({ value: [] }))
+  on('command.register', () => ({ value: undefined }) as never)
+  on('session.turns', () => ({ value: 0 }) as never)
+  on('session.start', ($, e) => ({ cwd: e.cwd }) as never)
+  fakeFiles(on, {})
+  await $.session.start({ source: 'startup', cwd: 'D:/project' } as never)
+  const run = (args: string) => $.command.run({ command: 'usage-hud', args, origin: { kind: 'composer' }, presentation: { layout: 'main', columns: 120 } } as never)
+  expect((await run('auto')).text).toBe('Auto-pilot: downgrade model off, compact at 90%.')
+  const ui = await mountBand($)
+  expect((await ui.find({ key: 'autopilot' }))?.text).toContain('on')
+  await ui.press({ key: 'autopilot' })
+  expect((await ui.find({ key: 'autopilot' }))?.text).toContain('off')
+  expect((await run('auto')).text).toBe('Auto-pilot: downgrade model off, compact at off.')
+  expect((await run('auto switch 80')).text).toContain('auto [on|off|downgrade')
+})
+
+test('weekly pace: projected percent by reset, or when the limit runs out', () => {
+  const day = 24 * 60 * 60_000
+  const now = Date.UTC(2026, 9, 14, 12) // a Wednesday
+  const resetIn = (ms: number) => new Date(now + ms).toISOString()
+  // half the week gone at 30%: on pace for 60%
+  expect(windowPace(30, resetIn(3.5 * day), now)).toEqual({ text: 'on pace for ~60%', isRisk: false })
+  // 45% at half: 90%, a warning
+  expect(windowPace(45, resetIn(3.5 * day), now).isRisk).toBe(true)
+  // 70% at half: out before the reset, 1.5 days of the same pace from now
+  expect(windowPace(70, resetIn(3.5 * day), now)).toEqual({ text: `out ~${dayTime(now + 1.5 * day)}`, isRisk: true })
+  expect(windowPace(100, resetIn(day), now)).toEqual({ text: 'limit reached', isRisk: true })
+  // too early in the window, or nothing to go on
+  expect(windowPace(2, resetIn(6.9 * day), now).text).toBe('pace --')
+  expect(windowPace(null, resetIn(day), now).text).toBe('pace --')
+  expect(windowPace(30, undefined, now).text).toBe('pace --')
+})
+
+test('burn rate and the context note', () => {
+  const now = Date.UTC(2026, 9, 14, 12)
+  expect(burnRate(3, now - 2 * 3_600_000, now)).toBe('$1.50/h')
+  expect(burnRate(3, now - 5 * 60_000, now)).toBe(null)
+  expect(burnRate(null, now - 3_600_000, now)).toBe(null)
+  expect(contextNote(42, 200000)).toBe('84k of 200k')
+  expect(contextNote(null, 200000)).toBe('of 200k tokens')
+  expect(contextNote(null, null)).toBe('of -- tokens')
+})
+
+test('the 7 day ring shows its pace', async ($, on) => {
+  mock.store(on)
+  const now = Date.UTC(2026, 9, 14, 12)
+  mock.clock(on, { now })
+  fakeFiles(on, {})
+  on('session.measure', ($, e) => ({ changed: e.changed }))
+  await $.session.measure({
+    context: { window: 200000, tokens: 20000, percent: 10 },
+    rateLimits: [{ kind: 'seven_day', percentUsed: 30, resetsAt: new Date(now + 3.5 * 24 * 3_600_000).toISOString() }],
+    changed: ['context', 'rateLimits'],
+  } as never)
+  const ui = await mountBand($)
+  expect(await ui.find({ text: /on pace for ~60%/ })).toBeDefined()
 })
 
 test('the codex row shows the Saved line from the delegation ledger', async ($, on) => {
@@ -534,6 +574,6 @@ test('the codex row shows the Saved line from the delegation ledger', async ($, 
   on('turn.complete', () => ({ text: '' }))
   await $.turn.complete({ answer: '', reason: 'answer' } as never)
   const ui = await mountBand($)
-  expect(await ui.find({ text: /Saved: 12k session · 12k today/ })).toBeDefined()
-  expect(await ui.find({ text: /Codex 5h: 8%/ })).toBeDefined()
+  expect(await ui.find({ text: /delegated 12k session · 12k today/ })).toBeDefined()
+  expect(await ui.find({ text: /5h ▱▱▱▱ 8%/ })).toBeDefined()
 })

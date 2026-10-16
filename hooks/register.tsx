@@ -1,8 +1,6 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
-import { loadDirect, selectEngine, runDirect } from './direct'
-import type { Engine } from './direct'
-import { codexTone, parseLedger, savedParts, totalsFor } from './savings'
+import { parseLedger, savedParts, totalsFor } from './savings'
 import type { SavingsTotals, SessionScope } from './savings'
 
 import type {
@@ -22,35 +20,9 @@ import type {
   WorkerRun,
 } from '../types'
 
-let directBusy = false
-const directEngine = atom({ plugin: 'usage-hud', key: 'directEngine' } as const, 'claude' as Engine)
-const directStatus = atom({ plugin: 'usage-hud', key: 'directStatus' } as const, '' as string)
-
-/** A manual switch is the user's choice: autopilot must not flip it back (to Claude: until the limit drops below 50%). */
-async function switchEngine($: EngineInterface, engine: Engine, manual = false) {
-  if (directBusy) return 'Codex is still working. Stop or finish that request before switching engines.'
-  const message = await selectEngine($, engine)
-  await update($, directEngine, () => engine)
-  await update($, directStatus, () => '')
-  if (manual) {
-    await setAutoSwitched($, false)
-    await update($, switchSuppressed, () => engine === 'claude')
-  }
-  return message
-}
-
-const setAutoSwitched = async ($: EngineInterface, value: boolean) => {
-  await update($, autoSwitched, () => value)
-  await $.store.set('autoSwitched', value) // survives a restart, so the way back to Claude is not lost
-}
-
 /** Percent used of a Claude limit now: a window whose reset has passed is empty (the reading may be stale in Codex mode). */
 const limitPct = (l: Limit, now: number): number =>
   l.resetsAt !== undefined && Date.parse(l.resetsAt) <= now ? 0 : l.percentUsed
-
-/** The 5h window alone: the engine switch balances short bursts, so a high weekly total must not pin Codex. */
-const fiveHourPct = (list: readonly Limit[], now: number): number =>
-  Math.max(0, ...list.filter(l => l.kind === 'five_hour').map(l => limitPct(l, now)))
 
 /** The current readings for the routing block, or undefined when nothing has been measured yet. */
 const readUsage = async ($: EngineInterface): Promise<UsageReading | undefined> => {
@@ -73,33 +45,7 @@ const readUsage = async ($: EngineInterface): Promise<UsageReading | undefined> 
   }
 }
 
-/** Flips to Codex when Claude's limits run high and Codex has room, and back once the 5h window falls 10 points under the trigger. */
-async function autoEngine($: EngineInterface, pct: number) {
-  const cfg = await read($, autoConfig)
-  if (cfg.switchThreshold <= 0 || directBusy) return
-  const now = await $.clock.now()
-  const [switched, suppressed, engine, cx] = await Promise.all([read($, autoSwitched), read($, switchSuppressed), read($, directEngine), read($, codexLimits)])
-  // Back to Claude 10 points under the trigger (the 5h reset normally does it), so it cannot flap at the line.
-  const back = Math.max(5, cfg.switchThreshold - 10)
-  if (pct < back && suppressed) await update($, switchSuppressed, () => false)
-  if (!switched && !suppressed && engine === 'claude' && pct >= cfg.switchThreshold) {
-    // Unknown Codex capacity is not free capacity: only switch on a reading.
-    const cxKnown = cx === null ? [] : [measuredPct(cx.fiveHour, now), measuredPct(cx.weekly, now)].filter((p): p is number => p !== null)
-    if (cxKnown.length === 0) return void $.ui.toast(`Auto-pilot: Claude at ${Math.round(pct)}%, but Codex usage is unknown — staying on Claude`)
-    const cxPct = Math.max(...cxKnown)
-    if (cxPct >= 95) return void $.ui.toast(`Auto-pilot: Claude at ${Math.round(pct)}%, but Codex is at ${Math.round(cxPct)}% too — staying on Claude`)
-    await switchEngine($, 'codex')
-    await setAutoSwitched($, true)
-    $.ui.toast(`⚡ Auto-pilot: engine → Codex, read-only (Claude at ${Math.round(pct)}%)`)
-  } else if (switched && pct < back) {
-    if (engine === 'codex') await switchEngine($, 'claude')
-    await setAutoSwitched($, false)
-    $.ui.toast('✅ Auto-pilot: Claude limit reset — engine → Claude')
-  }
-}
-
-const isAutoOn = (c: { switchThreshold: number; downgradeEnabled: boolean; compactThreshold: number; fallbackEnabled: boolean }) =>
-  c.switchThreshold > 0 || c.downgradeEnabled || c.compactThreshold > 0 || c.fallbackEnabled
+const isAutoOn = (c: AutoConfig) => c.downgradeEnabled || c.compactThreshold > 0
 
 // ---- state ------------------------------------------------------------------
 
@@ -136,15 +82,20 @@ const savingsScope = atom({ plugin: 'usage-hud', key: 'savingsScope' } as const,
 // ---- autopilot config -------------------------------------------------------
 
 type AutoConfig = {
-  switchThreshold: number    // 0 = disabled; auto-switch engine to codex at this 5h %
   downgradeEnabled: boolean  // auto-downgrade model at thresholds (opus→sonnet@70%, →haiku@85%)
   compactThreshold: number   // 0 = disabled; auto-compact context at this %
-  fallbackEnabled: boolean   // auto-route to codex when claude hits 100%
 }
-const DEFAULT_AUTO: AutoConfig = { switchThreshold: 50, downgradeEnabled: true, compactThreshold: 85, fallbackEnabled: true }
+const DEFAULT_AUTO: AutoConfig = { downgradeEnabled: false, compactThreshold: 85 } // the orchestrator model is never swapped out unasked
+const AUTO_OFF: AutoConfig = { downgradeEnabled: false, compactThreshold: 0 }
+/** A saved config, older ones included: only the keys this version knows. */
+const toAutoConfig = (x: unknown): AutoConfig => {
+  const v = (x ?? {}) as Partial<AutoConfig>
+  return {
+    downgradeEnabled: typeof v.downgradeEnabled === 'boolean' ? v.downgradeEnabled : DEFAULT_AUTO.downgradeEnabled,
+    compactThreshold: typeof v.compactThreshold === 'number' ? v.compactThreshold : DEFAULT_AUTO.compactThreshold,
+  }
+}
 const autoConfig = atom({ plugin: 'usage-hud', key: 'autoConfig' } as const, { ...DEFAULT_AUTO })
-const autoSwitched = atom({ plugin: 'usage-hud', key: 'autoSwitched' } as const, false)
-const switchSuppressed = atom({ plugin: 'usage-hud', key: 'switchSuppressed' } as const, false)
 const COMPACT_TOKENS = 150_000 // auto-compact above this many context tokens, whatever the window size
 const IDLE_CACHE_MS = 55 * 60_000 // the prompt cache lapses after about an hour idle; the next call then re-writes the whole context
 const IDLE_WARN_TOKENS = 60_000
@@ -170,7 +121,6 @@ export const MODELS = [
   { label: 'opus 5.5', id: 'claude-opus-5-5' },
   { label: 'sonnet 5.5', id: 'claude-sonnet-5-5' },
   { label: 'haiku 5.5', id: 'claude-haiku-5-5' },
-  { label: 'fable 5.1', id: 'claude-fable-5-1' },
 ] as const
 const MODEL_IDS: readonly string[] = MODELS.map(m => m.id)
 
@@ -424,6 +374,41 @@ export const pace = (
     ? { text: 'safe till reset', isRisk: false }
     : { text: `limit in ${formatEta(toLimit)}`, isRisk: true }
 }
+
+const WEEK_MS = 7 * 24 * 60 * 60_000
+const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+
+/** "Thu 14:00": a weekday and a time, for points within the week. */
+export const dayTime = (ms: number): string => `${DAYS[new Date(ms).getDay()]} ${clockTime(ms)}`
+
+/**
+ * Where a long window ends up at today's average pace: the percent used so far, spread over the share of the
+ * window that has gone. Under 5% of the window gone is too early to say.
+ */
+export const windowPace = (
+  pct: number | null,
+  resetsAt: string | undefined,
+  now: number,
+  spanMs = WEEK_MS,
+): { text: string; isRisk: boolean } => {
+  const reset = resetsAt ? Date.parse(resetsAt) : NaN
+  if (pct === null || !Number.isFinite(reset)) return { text: 'pace --', isRisk: false }
+  if (pct >= 100) return { text: 'limit reached', isRisk: true }
+  const gone = (spanMs - (reset - now)) / spanMs
+  if (gone < 0.05 || gone > 1) return { text: 'pace --', isRisk: false }
+  const projected = pct / gone
+  if (projected < 100) return { text: `on pace for ~${Math.round(projected)}%`, isRisk: projected >= 85 }
+  const elapsed = gone * spanMs
+  return { text: `out ~${dayTime(now + ((100 - pct) / pct) * elapsed)}`, isRisk: true }
+}
+
+/** Dollars per hour over the session, once it has run ten minutes. */
+export const burnRate = (usd: number | null, since: number, now: number): string | null =>
+  usd === null || since <= 0 || now - since < 10 * 60_000 ? null : `${money((usd * 3_600_000) / (now - since))}/h`
+
+/** "84k of 200k", or what is known of it. */
+export const contextNote = (pct: number | null, window: number | null): string =>
+  window === null ? 'of -- tokens' : pct === null ? `of ${tokensLabel(window)} tokens` : `${tokensLabel((pct / 100) * window)} of ${tokensLabel(window)}`
 
 /** The local calendar day of `ms`, as YYYY-MM-DD. */
 export const dayKey = (ms: number): string => {
@@ -746,36 +731,29 @@ const setMode = async ($: EngineInterface, pick?: string): Promise<string> => {
 
 type Todo = { content: string; status: string; activeForm: string }
 
-const USAGE = `Usage: /usage-hud [theme <${THEME_NAMES.join('|')}> | model <opus|sonnet|haiku|fable|auto> | effort <${EFFORTS.join('|')}|auto> | mode [name] | engine <claude|codex|status> | codex <model|effort|default> | auto [on|off|status|switch|downgrade|compact|fallback] [value]]`
+const USAGE = `Usage: /usage-hud [theme <${THEME_NAMES.join('|')}> | model <opus|sonnet|haiku|auto> | effort <${EFFORTS.join('|')}|auto> | mode [name] | codex <model|effort|default> | auto [on|off|status|downgrade|compact] [value]]`
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'usage-hud',
-      description: 'Toggle the HUD; switch directly between Claude and Codex with shared context',
-      argumentHint: '[engine|theme|model|effort|mode] [value]',
+      description: 'Toggle the usage HUD, or set its theme, model, effort, mode, Codex delegation and autopilot',
+      argumentHint: '[theme|model|effort|mode|codex|auto] [value]',
     })
 
     try {
-      const { state } = await loadDirect($)
-      await update($, directEngine, () => state.engine)
-    } catch { /* no bound session yet */ }
-
-    try {
-      const [savedTheme, savedModel, savedEffort, savedHidden, savedAuto, savedSwitched] = await Promise.all([
+      const [savedTheme, savedModel, savedEffort, savedHidden, savedAuto] = await Promise.all([
         $.store.get('theme'),
         $.store.get('modelOverride'),
         $.store.get('effortOverride'),
         $.store.get('isHidden'),
         $.store.get('autoConfig'),
-        $.store.get('autoSwitched'),
       ])
-      if (savedSwitched === true) await update($, autoSwitched, () => true)
       if (typeof savedTheme === 'string' && isThemeName(savedTheme)) await update($, theme, () => savedTheme)
       if (typeof savedModel === 'string' && MODEL_IDS.includes(savedModel)) await update($, modelOverride, () => savedModel)
       if (typeof savedEffort === 'string' && isEffort(savedEffort)) await update($, effortOverride, () => savedEffort)
       if (typeof savedHidden === 'boolean') await update($, isHidden, () => savedHidden)
-      if (savedAuto && typeof savedAuto === 'object') await update($, autoConfig, () => ({ ...DEFAULT_AUTO, ...(savedAuto as Partial<AutoConfig>) }))
+      if (savedAuto && typeof savedAuto === 'object') await update($, autoConfig, () => toAutoConfig(savedAuto))
     } catch {
       // settings keep their defaults when the store cannot be read
     }
@@ -832,9 +810,6 @@ export const register: Register = on => {
       const cfg = await read($, autoConfig)
       const fivePct = five?.percentUsed ?? 0
       const ctxPct = e.context.percent ?? 0
-
-      // Auto-switch engine to Codex when the 5h or 7 day limit is high, and back after the reset
-      await autoEngine($, fiveHourPct(e.rateLimits, await $.clock.now()))
 
       // Auto-downgrade model at thresholds
       if (cfg.downgradeEnabled && !(await read($, autoDownDisabled))) {
@@ -976,20 +951,11 @@ export const register: Register = on => {
           $.ui.toast(`Idle ${shortSpan(now - lastTurnAt)}: the cache expired, so this prompt re-writes ~${tokensLabel(((pct ?? 0) / 100) * (win ?? 0))} of context. /compact or /clear first is cheaper.`)
         }
       } catch { /* a warning must never block a prompt */ }
-      // In Codex mode Claude makes no calls, so its limits go stale: re-read them so the way back to Claude opens at the reset.
-      if (await read($, directEngine) === 'codex' && await read($, autoSwitched)) {
-        try {
-          const usage = await $.session.usage()
-          await update($, limits, () => usage.rateLimits)
-        } catch { /* a stale reading still ends at the reset time */ }
-        await autoEngine($, fiveHourPct(await read($, limits), await $.clock.now())).catch(() => undefined)
-      }
       // Prompts always go to Claude: no automatic or intercepted Codex routing here (Codex runs only via /codex:* or delegate.mjs).
       const r = await refreshRouting($)
       return next({ ...e, context: [...(e.context ?? []), routeContext(r, await readUsage($))] })
-    } catch (error) {
-      // A prompt is never dropped: log the failure and let the prompt reach Claude unchanged.
-      console.error('usage-hud: prompt routing failed, sending the prompt unchanged', error)
+    } catch {
+      // A prompt is never dropped: on any failure here it reaches Claude unchanged (the module has no console).
       return next(e)
     }
   })
@@ -1025,33 +991,25 @@ export const register: Register = on => {
       return { text: hidden ? 'Usage HUD hidden.' : 'Usage HUD shown.' }
     }
     if (sub === 'engine') {
-      if (arg === 'claude' || arg === 'codex') return { text: await switchEngine($, arg, true) }
-      const { state } = await loadDirect($)
-      return { text: 'Engine: ' + state.engine + '. Codex thread: ' + (state.threadId ?? 'not started') +
-        (state.pending ? '. Last request is pending or interrupted; inspect changes before continuing.' : '') +
-        '. Use /usage-hud engine claude or /usage-hud engine codex.' }
+      return { text: 'The engine switch was removed: prompts always go to Claude. Codex runs only when Claude delegates (see Route).' }
     }
     if (sub === 'theme' && isThemeName(arg)) {
       await setTheme($, arg)
       return { text: `Usage HUD theme: ${arg}.` }
     }
-    // With Codex as the engine, model and effort mean Codex's; the same thread is resumed with the new values.
-    if (sub === 'codex' || ((sub === 'model' || sub === 'effort') && (await read($, directEngine)) === 'codex')) {
-      const isEffortCmd = sub === 'effort' || (sub === 'codex' && isEffort(rest[0] ?? '') && rest[0] !== undefined)
-      if (isEffortCmd) {
-        const v = sub === 'codex' ? rest[0] : arg
-        if (v !== undefined && (v === 'auto' || v === 'default' || isEffort(v))) {
-          const level = isEffort(v) ? v : null
-          await setCodexEffort($, level)
-          return { text: `Codex effort: ${level ?? 'default'} (from the next request, same Codex thread).` }
-        }
+    // The model and effort Claude passes to Codex when it delegates (routing.json).
+    if (sub === 'codex') {
+      const level = rest[0]
+      if (level !== undefined && isEffort(level)) {
+        await setCodexEffort($, level)
+        return { text: `Codex effort: ${level} (from the next delegation).` }
       } else {
-        const m = sub === 'codex' ? rest.join(' ') : arg
+        const m = rest.join(' ')
         const isDefault = m === 'auto' || m === 'default'
         const id = isDefault ? null : findCodexModel(m)
         if (isDefault || id !== undefined) {
           await setCodexModel($, id ?? null)
-          return { text: `Codex model: ${id ?? 'account default'} (from the next request, same Codex thread).` }
+          return { text: `Codex model: ${id ?? 'account default'} (from the next delegation).` }
         }
       }
       return { text: `Codex models: ${CODEX_MODELS.join(', ')}, default. Efforts: ${EFFORTS.join(', ')}. Use /usage-hud codex <model|effort>.` }
@@ -1078,36 +1036,27 @@ export const register: Register = on => {
     if (sub === 'auto') {
       const cfg = await read($, autoConfig)
       if (arg === '' || arg === 'status') {
-        const sw = cfg.switchThreshold > 0 ? `${cfg.switchThreshold}%` : 'off'
         const dg = cfg.downgradeEnabled ? 'on (opus→sonnet@70%, →haiku@85%)' : 'off'
         const cp = cfg.compactThreshold > 0 ? `${cfg.compactThreshold}%` : 'off'
-        const fb = cfg.fallbackEnabled ? 'on' : 'off'
-        return { text: `Auto-pilot: switch engine at ${sw}, downgrade model ${dg}, compact at ${cp}, fallback ${fb}.` }
+        return { text: `Auto-pilot: downgrade model ${dg}, compact at ${cp}.` }
       }
       const parts = arg.split(/\s+/)
       const feature = parts[0]
       const val = parts[1] ?? ''
       const nextCfg: Partial<AutoConfig> = {}
-      if (feature === 'switch') {
-        if (val === 'off') nextCfg.switchThreshold = 0
-        else { const n = parseInt(val); if (n >= 50 && n <= 99) nextCfg.switchThreshold = n; else return { text: 'auto switch <50-99|off>' } }
-      } else if (feature === 'downgrade') {
+      if (feature === 'downgrade') {
         if (val === 'on') nextCfg.downgradeEnabled = true
         else if (val === 'off') nextCfg.downgradeEnabled = false
         else return { text: 'auto downgrade <on|off>' }
       } else if (feature === 'compact') {
         if (val === 'off') nextCfg.compactThreshold = 0
         else { const n = parseInt(val); if (n >= 50 && n <= 99) nextCfg.compactThreshold = n; else return { text: 'auto compact <50-99|off>' } }
-      } else if (feature === 'fallback') {
-        if (val === 'on') nextCfg.fallbackEnabled = true
-        else if (val === 'off') nextCfg.fallbackEnabled = false
-        else return { text: 'auto fallback <on|off>' }
       } else if (feature === 'on') {
         Object.assign(nextCfg, DEFAULT_AUTO)
       } else if (feature === 'off') {
-        nextCfg.switchThreshold = 0; nextCfg.downgradeEnabled = false; nextCfg.compactThreshold = 0; nextCfg.fallbackEnabled = false
+        Object.assign(nextCfg, AUTO_OFF)
       } else {
-        return { text: 'auto [on|off|switch <50-99|off>|downgrade <on|off>|compact <50-99|off>|fallback <on|off>]' }
+        return { text: 'auto [on|off|downgrade <on|off>|compact <50-99|off>]' }
       }
       const updated = { ...cfg, ...nextCfg }
       await update($, autoConfig, () => updated)
@@ -1147,17 +1096,12 @@ export const register: Register = on => {
       read($, worker),
       read($, lastWorker),
     ])
-    const [cxModel, cxEffort, cxLimits, autoCfg] = await Promise.all([read($, codexModel), read($, codexEffort), read($, codexLimits), read($, autoConfig)])
-    const savedTotals = await read($, savings)
-    const savedCodex5h = windowPct(cxLimits?.fiveHour ?? null, now)
-    const saved = savedParts(savedTotals, savedCodex5h)
-    const savedTone = codexTone(savedCodex5h)
-    const activeEngine = await read($, directEngine)
-    const activeStatus = await read($, directStatus)
+    const [cxLimits, autoCfg, savedTotals] = await Promise.all([read($, codexLimits), read($, autoConfig), read($, savings)])
     const th = THEMES[themeName]
     // One look for every "name  value" pair: accent name padded to a column, bright value.
     const name = (text: string, width: number) => <Text color={hex(th.accent)}>{text.padEnd(width)}</Text>
     const value = (text: string) => <Text bold color={hex(th.text)}>{text}</Text>
+    const tone = (risk: boolean) => (risk ? hex(th.warn) : undefined)
     // Three rings need room: the info and controls columns sit beside them from 135 columns.
     const isWide = e.props.bodyColumns >= 135
 
@@ -1168,13 +1112,7 @@ export const register: Register = on => {
     const rings = [
       limitRing('5h limit', 'five_hour'),
       limitRing('7 day limit', 'seven_day'),
-      {
-        label: 'context',
-        kind: 'context',
-        pct: ctx,
-        note: `of ${ctxWindow === null ? '--' : tokensLabel(ctxWindow)} tokens`,
-        resetsAt: undefined,
-      },
+      { label: 'context', kind: 'context', pct: ctx, note: contextNote(ctx, ctxWindow), resetsAt: undefined },
     ]
     // Codex's own limits get rings too where there is room beside the three Claude ones.
     const codexRing = (label: string, kind: string, w: CodexWindow | null) => ({
@@ -1193,6 +1131,7 @@ export const register: Register = on => {
     const cxKnown = cxPcts.filter((p): p is number => p !== null)
     const cxPeak = cxKnown.length === 0 ? null : Math.max(...cxKnown)
     const forecast = pace(trend, rings[0]?.resetsAt, now)
+    const weekly = windowPace(rings[1]?.pct ?? null, rings[1]?.resetsAt, now)
     const canCompact = ctx !== null && ctx >= 80
 
     const modelLine = [
@@ -1210,8 +1149,15 @@ export const register: Register = on => {
       taskLine = `${bar(t.total === 0 ? 0 : t.completed / t.total, 6)} ${left} of ${t.total} left · ${eta}${current}`
     }
 
+    // The Codex row: its limits, then a delegated run once there has been one, then the ledger total when not zero.
+    const workerNote = running || finished ? ` · ${workerLine(running, finished)}` : ''
+    const savedNote = savedTotals === null || (savedTotals.session === 0 && savedTotals.today === 0)
+      ? ''
+      : ` · ${savedParts(savedTotals, null).saved.replace('Saved:', 'delegated')}`
+
+    const burn = burnRate(spent, began, now)
     const sessionLine = [
-      money(spent),
+      money(spent) + (burn === null ? '' : ` (${burn})`),
       `${turnCount} ${turnCount === 1 ? 'turn' : 'turns'}`,
       `${toolCount} tools`,
       ...(began > 0 ? [`⏱ ${uptime(began, now)}`] : []),
@@ -1224,63 +1170,47 @@ export const register: Register = on => {
     ].join(' · ')
 
     const controls = [
-      { key: 'engine', name: 'Engine', value: activeEngine, onPress: async () => {
-        $.ui.toast(await switchEngine($, activeEngine === 'claude' ? 'codex' : 'claude', true))
-      } },
       { key: 'theme', name: 'Theme', value: themeName, onPress: () => setTheme($, nextTheme(themeName)) },
       {
         key: 'model',
-        name: activeEngine === 'codex' ? 'Model·Cx' : 'Model',
-        // one Model button: it drives whichever engine is active
-        value: activeEngine === 'codex' ? codexModelButton(cxModel) : modelButton(pickedModel),
-        onPress: activeEngine === 'codex'
-          ? () => setCodexModel($, cycle(CODEX_MODEL_IDS, cxModel))
-          : async () => { await setModel($, cycle(MODEL_IDS, pickedModel)); await update($, autoDownDisabled, () => true); await update($, autoOrigModel, () => null) },
+        name: 'Model',
+        value: modelButton(pickedModel),
+        // a hand-picked model also stops autopilot from changing it
+        onPress: async () => {
+          await setModel($, cycle(MODEL_IDS, pickedModel))
+          await update($, autoDownDisabled, () => true)
+          await update($, autoOrigModel, () => null)
+        },
       },
-      {
-        key: 'effort',
-        name: activeEngine === 'codex' ? 'Effort·Cx' : 'Effort',
-        value: activeEngine === 'codex' ? (cxEffort ?? 'default') : (pickedEffort ?? 'auto'),
-        onPress: activeEngine === 'codex'
-          ? () => setCodexEffort($, cycle(EFFORTS, cxEffort))
-          : () => setEffort($, cycle(EFFORTS, pickedEffort)),
-      },
+      { key: 'effort', name: 'Effort', value: pickedEffort ?? 'auto', onPress: () => setEffort($, cycle(EFFORTS, pickedEffort)) },
       {
         key: 'mode',
         name: 'Mode',
         value: mode ?? '--',
-       
         onPress: async () => {
           const result = await setMode($)
           if (!result.startsWith('Mode: ')) $.ui.toast(result)
         },
       },
-      // Delegation to the Codex worker CLI; Claude's own model stays the Model control's.
+      // Whether Claude may delegate to the Codex CLI; Claude's own model stays the Model control's.
       { key: 'route', name: 'Route', value: routeName, onPress: () => setRoute($, nextRoute(routeName)) },
-      // These set the model Claude delegates to; with Codex as the engine, Model and Effort above already do that.
-      ...(activeEngine === 'codex' ? [] : [
-        {
-          key: 'codexModel',
-          name: 'Codex',
-          value: codexModelButton(cxModel),
-          // a hand-set model outside the list goes back to the default
-          onPress: () => setCodexModel($, cycle(CODEX_MODEL_IDS, cxModel)),
-        },
-        { key: 'codexEffort', name: 'Cx eff', value: cxEffort ?? 'default', onPress: () => setCodexEffort($, cycle(EFFORTS, cxEffort)) },
-      ]),
-      { key: 'autopilot', name: 'Auto', value: isAutoOn(autoCfg) ? '✦ on' : 'off',
+      {
+        key: 'autopilot',
+        name: 'Auto',
+        value: isAutoOn(autoCfg) ? '✦ on' : 'off',
         onPress: async () => {
           const isOn = isAutoOn(autoCfg)
-          const toggledCfg = isOn ? { switchThreshold: 0, downgradeEnabled: false, compactThreshold: 0, fallbackEnabled: false } : { ...DEFAULT_AUTO }
+          const toggledCfg = isOn ? { ...AUTO_OFF } : { ...DEFAULT_AUTO }
           await update($, autoConfig, () => toggledCfg)
           await $.store.set('autoConfig', toggledCfg)
-          $.ui.toast(isOn ? 'Auto-pilot off' : '⚡ Auto-pilot on (switch@85%, downgrade, compact@85%, fallback)')
-        } },
+          $.ui.toast(isOn ? 'Auto-pilot off' : `⚡ Auto-pilot on (compact at ${DEFAULT_AUTO.compactThreshold}%)`)
+        },
+      },
     ]
 
     return (
       <Box borderStyle="round" borderColor={borderFor(maxPct, th)} paddingX={1} flexDirection={isWide ? 'row' : 'column'}>
-        <Box flexDirection="row">
+        <Box flexDirection="row" flexWrap="wrap">
           {rings.map((r, i) => (
             <Box key={r.kind} flexDirection="row" marginRight={i < rings.length - 1 ? 2 : 0}>
               <Raster key={`donut-${r.kind}`} columns={COLS} rows={ROWS} cells={donutCells(r.pct, th)} />
@@ -1293,9 +1223,14 @@ export const register: Register = on => {
                 {r.kind === 'five_hour' && (
                   <Text>
                     {trend.length > 1 && <Text color={hex(th.ok)}>{`${sparkline(trend.slice(-8).map(x => x.pct))} `}</Text>}
-                    <Text color={forecast.isRisk ? hex(th.warn) : undefined} dimColor={!forecast.isRisk}>
+                    <Text color={tone(forecast.isRisk)} dimColor={!forecast.isRisk}>
                       {forecast.text}
                     </Text>
+                  </Text>
+                )}
+                {r.kind === 'seven_day' && (
+                  <Text color={tone(weekly.isRisk)} dimColor={!weekly.isRisk}>
+                    {weekly.text}
                   </Text>
                 )}
                 {r.kind === 'context' && canCompact && (
@@ -1318,8 +1253,7 @@ export const register: Register = on => {
 
         <Box flexDirection="column" marginLeft={isWide ? 2 : 0} flexGrow={1}>
           <Text dimColor bold>NOW</Text>
-          <Text wrap="truncate-end">{name('engine', 8)}{value(activeEngine)}{activeStatus ? ' · ' + activeStatus : ''}</Text>
-          <Text>
+          <Text wrap="truncate-end">
             {name('model', 8)}
             {value(modelLine)}
           </Text>
@@ -1328,39 +1262,27 @@ export const register: Register = on => {
             {taskLine}
           </Text>
           <Text wrap="truncate-end">
-            {name('worker', 8)}
-            <Text
-              color={running ? hex(th.warn) : finished && finished.outcome !== 'ok' ? hex(th.bad) : undefined}
-              dimColor={!running && !finished}
-            >
-              {workerLine(running, finished)}
-            </Text>
-          </Text>
-          <Text wrap="truncate-end">
             {name('codex', 8)}
-            <Text
-              color={cxPeak === null ? undefined : hex(fillColor(cxPeak, th))}
-              dimColor={cxLimits === null}
-            >
+            <Text color={cxPeak === null ? undefined : hex(fillColor(cxPeak, th))} dimColor={cxLimits === null}>
               {codexLine(cxLimits, now)}
             </Text>
-            <Text>{` · ${saved.saved} · `}</Text>
-            <Text color={savedTone === 'bad' ? hex(th.bad) : savedTone === 'warn' ? hex(th.warn) : undefined}>{saved.codex}</Text>
+            <Text color={running ? hex(th.warn) : finished && finished.outcome !== 'ok' ? hex(th.bad) : undefined}>{workerNote}</Text>
+            <Text dimColor>{savedNote}</Text>
           </Text>
-          <Text>
+          <Text wrap="truncate-end">
             {name('session', 8)}
             {sessionLine}
           </Text>
-          <Text>
+          <Text wrap="truncate-end">
             {name('today', 8)}
             {todayLine}
           </Text>
         </Box>
 
-        <Box flexDirection={isWide ? 'column' : 'row'} marginLeft={isWide ? 2 : 0} paddingLeft={isWide ? 1 : 0}>
+        <Box flexDirection={isWide ? 'column' : 'row'} flexWrap={isWide ? 'nowrap' : 'wrap'} marginLeft={isWide ? 2 : 0} paddingLeft={isWide ? 1 : 0}>
           {isWide && <Text dimColor bold>CONTROLS</Text>}
           {controls.map(c => (
-            <Box key={c.key} marginRight={isWide ? 0 : 1}>
+            <Box key={c.key} marginRight={isWide ? 0 : 2}>
               <Button key={c.key} label={`${c.name}: ${c.value}`} plain onPress={c.onPress}>
                 {name(c.name, 7)}
                 {value(c.value)}

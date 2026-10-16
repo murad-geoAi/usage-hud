@@ -1,7 +1,7 @@
 {
   "name": "usage-hud",
-  "version": "0.3.0",
-  "description": "A HUD band above the prompt: Claude and Codex limits, model and effort, task progress, plus a direct Claude/Codex engine switch with autopilot.",
+  "version": "0.4.0",
+  "description": "A live usage dashboard above the prompt: Claude and Codex limits with pace forecasts, context, cost, tasks and quick controls.",
   "author": {
     "name": "gmurad"
   },

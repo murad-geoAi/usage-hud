@@ -41,8 +41,6 @@ export type WorkerDone = { name: WorkerName; ms: number; outcome: 'ok' | 'failed
 declare module 'claude-code' {
   interface PluginState {
     'usage-hud': {
-      directEngine: 'claude' | 'codex'
-      directStatus: string
       limits: Limit[]
       model: ModelInfo | null
       tasks: Tasks | null
@@ -92,10 +90,8 @@ declare module 'claude-code' {
       savings: { session: number; today: number } | null
       /** Which session the Saved line counts: its Claude Code ID (null = count from the first render). */
       savingsScope: { id: string | null; since: number } | null
-      autoConfig: { switchThreshold: number; downgradeEnabled: boolean; compactThreshold: number; fallbackEnabled: boolean }
-      autoSwitched: boolean
-      /** The user chose Claude by hand: autopilot keeps off Codex until the limit drops below 50%. */
-      switchSuppressed: boolean
+      /** Autopilot: model downgrade at 70/85% of the 5h window, and the context % that compacts (0 = off). */
+      autoConfig: { downgradeEnabled: boolean; compactThreshold: number }
       autoOrigModel: string | null
       autoDownDisabled: boolean
       autoCompacted: boolean

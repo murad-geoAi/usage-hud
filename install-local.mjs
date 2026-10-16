@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 
 const source = dirname(fileURLToPath(import.meta.url))
 const claude = join(homedir(), '.claude')
-const files = ['hooks/register.tsx', 'hooks/direct.ts', 'hooks/savings.ts', 'hooks/register.test.ts', 'hooks/direct.test.ts', 'hooks/savings.test.ts', 'types/index.d.ts', 'README.md', '.claude-plugin/plugin.json']
+const files = ['hooks/register.tsx', 'hooks/savings.ts', 'hooks/register.test.ts', 'hooks/savings.test.ts', 'types/index.d.ts', 'README.md', '.claude-plugin/plugin.json']
 const registry = JSON.parse(await readFile(join(claude, 'plugins/installed_plugins.json'), 'utf8'))
 const installs = registry.plugins?.['usage-hud@my-mods'] ?? []
 if (installs.length !== 1 || installs[0].scope !== 'user') throw new Error('Expected one user-scoped usage-hud@my-mods installation. No files were changed.')
@@ -20,7 +20,7 @@ for (const target of targets) {
   const manifest = JSON.parse(await readFile(join(actual, '.claude-plugin/plugin.json'), 'utf8'))
   if (manifest.name !== 'usage-hud') throw new Error('Wrong plugin at ' + actual)
 }
-const backup = join(claude, 'backups', 'usage-hud-direct-' + new Date().toISOString().replace(/[:.]/g, '-'))
+const backup = join(claude, 'backups', 'usage-hud-' + new Date().toISOString().replace(/[:.]/g, '-'))
 const records = []
 // Read all source files before changing the installation.
 const contents = await Promise.all(files.map(file => readFile(join(source, file))))
@@ -55,6 +55,11 @@ if (helperExisted) {
 }
 await mkdir(dirname(helperTarget), { recursive: true })
 await writeFile(helperTarget, helperSource)
-console.log('Usage HUD direct engine installed. Backup: ' + backup)
-console.log('Run /reload-plugins in Claude Code, then /usage-hud engine codex.')
-console.log('Use /usage-hud engine claude to return. The same conversation stays available.')
+console.log('Usage HUD installed. Backup: ' + backup)
+console.log('Run /reload-plugins in Claude Code.')
+// Files of earlier versions that this one no longer has (the removed direct engine).
+for (const target of targets) {
+  for (const old of ['hooks/direct.ts', 'hooks/direct.test.ts']) {
+    try { await stat(join(target, old)); console.log('Left over from an earlier version, safe to delete: ' + join(target, old)) } catch {}
+  }
+}

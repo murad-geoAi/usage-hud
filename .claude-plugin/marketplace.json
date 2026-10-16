@@ -8,7 +8,7 @@
     {
       "name": "usage-hud",
       "source": "./",
-      "description": "HUD band above the prompt: usage donuts, model, tasks, ETA."
+      "description": "Live usage dashboard above the prompt: limits, pace, context, cost, tasks."
     }
   ]
 }

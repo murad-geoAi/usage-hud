@@ -1,7 +1,7 @@
 # usage-hud
 
 ## Project facts
-- Stack: Claude Code plugin (mod). TypeScript hooks in `hooks/` (`register.tsx`, `direct.ts`), Node ESM helpers (`delegate.mjs`, `codex-limits.mjs`, `install-local.mjs`). No package.json, no npm deps.
+- Stack: Claude Code plugin (mod). TypeScript hooks in `hooks/` (`register.tsx`, `savings.ts`), Node ESM helpers (`delegate.mjs`, `codex-limits.mjs`, `install-local.mjs`). No package.json, no npm deps.
 - Run: `/reload-plugins` inside Claude Code (installed via `.claude-plugin/marketplace.json`).
 - Test: `claude plugin test .` (runs `hooks/*.test.ts`, imports from `claude-code/testing`).
 - Lint/validate: `claude plugin validate .`
@@ -13,13 +13,13 @@
 - `/build <feature> [--claude|--codex]` -> branch `feature/<feature>`, works through tasks.md without questions.
 - `/check <feature>` -> one Codex review, fixes, `report.md`, push the feature branch.
 - `/resume <feature>` -> status + continue the build.
-- Roles: Claude writes specs/plans/tasks, [M]/[L] code, runs tests, pushes. Codex critiques plans, reviews features, writes [S] code, takes over tasks that failed twice.
+- Roles: Opus orchestrates: writes specs/plans/tasks, [L] code, reviews every Codex diff, runs tests, pushes. Codex critiques plans, reviews features, writes [S] and [M] code, takes over tasks that failed twice.
 - Never let Claude and Codex work on the same task at the same time.
-- Codex calls in this repo go through the `codex:codex-rescue` agent (plugin openai/codex-plugin-cc). Prompts use `[TASK] / [CONTEXT] / [GOAL]`.
+- Codex calls go through `node ~/.claude/delegation/delegate.mjs --mode implement|read` (one Bash call). Prompts use `[TASK] / [CONTEXT] / [GOAL]`.
 
 ## Cost rules
 - $0 extra spending. Never use Fable models. Never suggest usage credits or an API key.
-- Sonnet is the default for everything. Opus only for `/spec --deep`.
+- Opus is the orchestrator (main session). Codex does the implementation so Opus's limit lasts. Haiku for codebase search subagents.
 - For searching the codebase, use a Haiku subagent (Explore, model haiku) and bring back only the relevant file paths and lines.
 - Read only files listed in plan.md unless you must explore. Do not re-read files.
 - Codex reviews once per spec and once per feature, never per task. Never enable the Codex review gate.

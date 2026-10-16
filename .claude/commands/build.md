@@ -1,7 +1,7 @@
 ---
-description: Build an approved feature task by task on feature/<name>, with Codex taking [S] tasks
+description: Build an approved feature task by task on feature/<name>; Opus orchestrates, Codex implements [S] and [M] tasks
 argument-hint: <feature-name> [--claude | --codex]
-model: sonnet
+model: opus
 ---
 
 Arguments: $ARGUMENTS
@@ -12,29 +12,29 @@ Setup
 - Write the mode at the top of tasks.md (`Mode: split|claude|codex`).
 
 Mode
-- Default (split): [S] -> Codex at low effort; [M] and [L] -> you.
+- Default (split): [S] and [M] -> Codex; [L] (design decisions, tricky logic) -> you.
 - `--claude`: you write every task.
-- `--codex`: Codex writes every task at medium effort; you only run tests, tick and commit.
+- `--codex`: Codex writes every task; you only review the diff, run tests, tick and commit.
 
 Sending a task to Codex
-- Agent tool, `subagent_type: "codex:codex-rescue"`, `run_in_background: true`, ONE Codex task at a time. Prompt:
+- ONE Bash call from the project root, `timeout: 600000`, foreground, one task at a time. Do not edit files while it runs (its diff is a before/after snapshot):
   ```
-  --effort <low|medium|high> --write
+  node ~/.claude/delegation/delegate.mjs --mode implement <<'EOF'
   [TASK] <task line from tasks.md>
-  [CONTEXT] Spec: specs/<feature>/spec.md. Files: <paths from plan.md>. Done when: <...>. Test: <command>.
-  [GOAL] Make the change in those files only. Do not commit. Reply with changed files and test result in <= 10 lines.
+  [CONTEXT] Spec: specs/<feature>/spec.md. Files: <paths from plan.md>. <the relevant plan details and excerpts>. Test: <command>.
+  [GOAL] Done when: <...>. Change those files only. Do not commit.
+  EOF
   ```
-- While it runs, work on a task that does not depend on it and does not touch the same files. Never work on the task Codex has.
-- If the `codex:codex-rescue` agent is not available (plugin not installed): Codex cannot write code here, so switch the build to `--claude` and tell me in one line.
-- If Codex reports a usage-limit error: do not retry. Switch the remaining build to `--claude` and tell me in one line.
+- You get Codex's SUMMARY / CHECKS / OPEN and the diff. Review the diff against the task before anything else.
+- Exit 3 (Codex near its limit) or a usage-limit error: do not retry. Switch the remaining build to `--claude` and tell me in one line.
 
 For every task
-1. Implement (or receive Codex's result and inspect `git diff`).
+1. Implement, or send it to Codex and review the diff it returns (right files, nothing unrelated, no deleted tests).
 2. Run the test and lint commands from Project facts. Never tick a task with a failing test.
 3. Tick it in tasks.md, then `git add` the task's files + tasks.md and commit `feat(<feature>): <task>`.
 
 Failures
-- A task fails twice -> hand it to the other model (Claude -> Codex at `--effort high`; Codex -> you).
+- A task fails twice -> hand it to the other model (Claude -> Codex; Codex -> you).
 - Fails again -> mark `BLOCKED: <error, one line>` in tasks.md (and under "Blocked"), commit, move on.
 
 Rules
