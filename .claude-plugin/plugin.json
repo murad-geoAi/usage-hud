@@ -1,7 +1,7 @@
 {
   "name": "usage-hud",
-  "version": "0.2.0",
-  "description": "A HUD band above the prompt: 5h and 7 day limit donuts, model and effort, task progress and ETA.",
+  "version": "0.3.0",
+  "description": "A HUD band above the prompt: Claude and Codex limits, model and effort, task progress, plus a direct Claude/Codex engine switch with autopilot.",
   "author": {
     "name": "gmurad"
   },

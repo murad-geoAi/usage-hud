@@ -1,5 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
+import { loadDirect, selectEngine, runDirect } from './direct'
+import type { Engine } from './direct'
 
 import type {
   CodexLimits,
@@ -17,6 +19,83 @@ import type {
   WorkerName,
   WorkerRun,
 } from '../types'
+
+let directBusy = false
+const directEngine = atom({ plugin: 'usage-hud', key: 'directEngine' } as const, 'claude' as Engine)
+const directStatus = atom({ plugin: 'usage-hud', key: 'directStatus' } as const, '' as string)
+
+/** A manual switch is the user's choice: autopilot must not flip it back (to Claude: until the limit drops below 50%). */
+async function switchEngine($: EngineInterface, engine: Engine, manual = false) {
+  if (directBusy) return 'Codex is still working. Stop or finish that request before switching engines.'
+  const message = await selectEngine($, engine)
+  await update($, directEngine, () => engine)
+  await update($, directStatus, () => '')
+  if (manual) {
+    await setAutoSwitched($, false)
+    await update($, switchSuppressed, () => engine === 'claude')
+  }
+  return message
+}
+
+const setAutoSwitched = async ($: EngineInterface, value: boolean) => {
+  await update($, autoSwitched, () => value)
+  await $.store.set('autoSwitched', value) // survives a restart, so the way back to Claude is not lost
+}
+
+/** Percent used of a Claude limit now: a window whose reset has passed is empty (the reading may be stale in Codex mode). */
+const limitPct = (l: Limit, now: number): number =>
+  l.resetsAt !== undefined && Date.parse(l.resetsAt) <= now ? 0 : l.percentUsed
+
+/** The fuller of the 5h and 7 day limits: either one ending Claude's use counts. */
+const claudePct = (list: readonly Limit[], now: number): number =>
+  Math.max(0, ...list.filter(l => l.kind === 'five_hour' || l.kind === 'seven_day').map(l => limitPct(l, now)))
+
+/** The current readings for the routing block, or undefined when nothing has been measured yet. */
+const readUsage = async ($: EngineInterface): Promise<UsageReading | undefined> => {
+  try {
+    const now = await $.clock.now()
+    const [list, cx] = await Promise.all([read($, limits), read($, codexLimits)])
+    const of = (kind: string) => {
+      const l = list.find(x => x.kind === kind)
+      return l === undefined ? null : limitPct(l, now)
+    }
+    const u: UsageReading = {
+      claude5h: of('five_hour'),
+      claudeWk: of('seven_day'),
+      codex5h: cx === null ? null : measuredPct(cx.fiveHour, now),
+      codexWk: cx === null ? null : measuredPct(cx.weekly, now),
+    }
+    return Object.values(u).every(v => v === null) ? undefined : u
+  } catch {
+    return undefined // a missing reading must never block a prompt
+  }
+}
+
+/** Flips to Codex when Claude's limits run high and Codex has room, and back once they fall below 50%. */
+async function autoEngine($: EngineInterface, pct: number) {
+  const cfg = await read($, autoConfig)
+  if (cfg.switchThreshold <= 0 || directBusy) return
+  const now = await $.clock.now()
+  const [switched, suppressed, engine, cx] = await Promise.all([read($, autoSwitched), read($, switchSuppressed), read($, directEngine), read($, codexLimits)])
+  if (pct < 50 && suppressed) await update($, switchSuppressed, () => false)
+  if (!switched && !suppressed && engine === 'claude' && pct >= cfg.switchThreshold) {
+    // Unknown Codex capacity is not free capacity: only switch on a reading.
+    const cxKnown = cx === null ? [] : [measuredPct(cx.fiveHour, now), measuredPct(cx.weekly, now)].filter((p): p is number => p !== null)
+    if (cxKnown.length === 0) return void $.ui.toast(`Auto-pilot: Claude at ${Math.round(pct)}%, but Codex usage is unknown — staying on Claude`)
+    const cxPct = Math.max(...cxKnown)
+    if (cxPct >= 95) return void $.ui.toast(`Auto-pilot: Claude at ${Math.round(pct)}%, but Codex is at ${Math.round(cxPct)}% too — staying on Claude`)
+    await switchEngine($, 'codex')
+    await setAutoSwitched($, true)
+    $.ui.toast(`⚡ Auto-pilot: engine → Codex, read-only (Claude at ${Math.round(pct)}%)`)
+  } else if (switched && pct < 50) {
+    if (engine === 'codex') await switchEngine($, 'claude')
+    await setAutoSwitched($, false)
+    $.ui.toast('✅ Auto-pilot: Claude limit reset — engine → Claude')
+  }
+}
+
+const isAutoOn = (c: { switchThreshold: number; downgradeEnabled: boolean; compactThreshold: number; fallbackEnabled: boolean }) =>
+  c.switchThreshold > 0 || c.downgradeEnabled || c.compactThreshold > 0 || c.fallbackEnabled
 
 // ---- state ------------------------------------------------------------------
 
@@ -47,6 +126,22 @@ const lastWorker = atom({ plugin: 'usage-hud', key: 'lastWorker' } as const, nul
 const codexModel = atom({ plugin: 'usage-hud', key: 'codexModel' } as const, null as string | null)
 const codexEffort = atom({ plugin: 'usage-hud', key: 'codexEffort' } as const, null as EffortName | null)
 const codexLimits = atom({ plugin: 'usage-hud', key: 'codexLimits' } as const, null as CodexLimits | null)
+
+// ---- autopilot config -------------------------------------------------------
+
+type AutoConfig = {
+  switchThreshold: number    // 0 = disabled; auto-switch engine to codex at this 5h %
+  downgradeEnabled: boolean  // auto-downgrade model at thresholds (opus→sonnet@70%, →haiku@85%)
+  compactThreshold: number   // 0 = disabled; auto-compact context at this %
+  fallbackEnabled: boolean   // auto-route to codex when claude hits 100%
+}
+const DEFAULT_AUTO: AutoConfig = { switchThreshold: 85, downgradeEnabled: true, compactThreshold: 85, fallbackEnabled: true }
+const autoConfig = atom({ plugin: 'usage-hud', key: 'autoConfig' } as const, { ...DEFAULT_AUTO })
+const autoSwitched = atom({ plugin: 'usage-hud', key: 'autoSwitched' } as const, false)
+const switchSuppressed = atom({ plugin: 'usage-hud', key: 'switchSuppressed' } as const, false)
+const autoOrigModel = atom({ plugin: 'usage-hud', key: 'autoOrigModel' } as const, null as string | null)
+const autoDownDisabled = atom({ plugin: 'usage-hud', key: 'autoDownDisabled' } as const, false)
+const autoCompacted = atom({ plugin: 'usage-hud', key: 'autoCompacted' } as const, false)
 
 // ---- choices ----------------------------------------------------------------
 
@@ -110,6 +205,16 @@ const CODEX_MODEL_IDS: readonly string[] = CODEX_MODELS
 
 export const codexModelButton = (id: string | null): string => (id === null ? 'default' : id.replace(/^gpt-/, ''))
 
+/** "gpt-5.6-sol", "5.6-sol" or a unique fragment such as "terra" resolves to a listed Codex model. */
+export const findCodexModel = (text: string): string | undefined => {
+  const t = text.trim().toLowerCase()
+  if (t === '') return undefined
+  const exact = CODEX_MODEL_IDS.find(id => id === t || id.replace(/^gpt-/, '') === t)
+  if (exact) return exact
+  const partial = CODEX_MODEL_IDS.filter(id => id.includes(t))
+  return partial.length === 1 ? partial[0] : undefined
+}
+
 export type Routing = { preference: RouteName; codexModel: string | null; codexEffort: EffortName | null }
 
 /** routing.json's values; a missing, unreadable or unknown value reads as auto / default. */
@@ -149,10 +254,32 @@ export const workerOf = (command: string): WorkerName | null =>
   /^\s*codex\s+exec\b/.test(command) ? 'codex' : null
 
 /** What the model reads beside each typed prompt. */
-export const routeContext = ({ preference, codexModel: m, codexEffort: eff }: Routing): string =>
+export const routeContext = ({ preference, codexModel: m, codexEffort: eff }: Routing, usage?: UsageReading): string =>
   `[delegation-routing] preference=${preference} codexModel=${m ?? 'default'} codexEffort=${eff ?? 'default'}. ` +
+  (usage === undefined ? '' : `${usageLine(usage)} `) +
   `This is the user's routing preference for the Codex worker CLI, set in Usage HUD. It is not Claude Code's model. ` +
   `Apply the delegation-orchestration rules in ~/.claude/CLAUDE.md.`
+
+/** Percent used per window, null where there is no reading. */
+export type UsageReading = { claude5h: number | null; claudeWk: number | null; codex5h: number | null; codexWk: number | null }
+
+/**
+ * Pressure on Claude: the fuller of its two windows. low under 60%, medium under 85%, high above.
+ * A missing window can hide an exhausted one, so it only ever rules out "low": the answer is then unknown.
+ */
+export const pressureOf = ({ claude5h, claudeWk }: UsageReading): 'low' | 'medium' | 'high' | 'unknown' => {
+  const known = [claude5h, claudeWk].filter((p): p is number => p !== null)
+  if (known.length === 0) return 'unknown'
+  const top = Math.max(...known)
+  if (top >= 85) return 'high'
+  if (known.length < 2) return 'unknown'
+  return top < 60 ? 'low' : 'medium'
+}
+
+const usageLine = (u: UsageReading): string => {
+  const pct = (p: number | null) => (p === null ? '?' : `${Math.round(p)}%`)
+  return `usage claude5h=${pct(u.claude5h)} claudeWeek=${pct(u.claudeWk)} codex5h=${pct(u.codex5h)} codexWeek=${pct(u.codexWk)} pressure=${pressureOf(u)}.`
+}
 
 // ---- Codex usage ------------------------------------------------------------
 // Codex records its limits in each session's rollout file. `codex exec --ephemeral` (Claude's worker
@@ -204,6 +331,10 @@ const findRateLimits = (node: unknown): RateLimits | null => {
 /** Percent used now: a window whose reset has passed is empty. */
 export const windowPct = (w: CodexWindow | null, now: number): number | null =>
   w === null ? null : w.resetsAt <= now ? 0 : w.pct
+
+/** What was actually measured: a window that has reset since the reading is unknown (Codex may have been used since), not 0. */
+export const measuredPct = (w: CodexWindow | null, now: number): number | null =>
+  w === null || w.resetsAt <= now ? null : w.pct
 
 /** The NOW row for Codex: both windows, and when they were read. */
 export const codexLine = (limits: CodexLimits | null, now: number): string => {
@@ -453,8 +584,46 @@ const readCodexLimits = async ($: EngineInterface): Promise<CodexLimits | null> 
   return null
 }
 
-const refreshCodexLimits = async ($: EngineInterface) => {
-  const found = await readCodexLimits($)
+/** The one JSON line codex-limits.mjs prints, checked field by field; null for anything else. */
+export const parseLiveLimits = (text: string): CodexLimits | null => {
+  try {
+    const x = JSON.parse(text.trim().split('\n').pop() ?? '') as Record<string, unknown>
+    const win = (w: unknown): CodexWindow | null => {
+      const v = w as { pct?: unknown; resetsAt?: unknown } | null
+      return v && typeof v.pct === 'number' && typeof v.resetsAt === 'number' ? { pct: v.pct, resetsAt: v.resetsAt } : null
+    }
+    const limits = { fiveHour: win(x.fiveHour), weekly: win(x.weekly) }
+    if (limits.fiveHour === null && limits.weekly === null) return null
+    if (typeof x.seenAt !== 'number') return null
+    return { ...limits, seenAt: x.seenAt, plan: typeof x.plan === 'string' ? x.plan : null }
+  } catch {
+    return null
+  }
+}
+
+const LIVE_EVERY_MS = 60_000
+let liveAskedAt = 0
+
+/**
+ * Codex's limits as Codex reports them now. Its session logs miss every `codex exec --ephemeral` run, so they
+ * under-read. The helper ships next to routing.json; null when it is missing, Codex is down, or it is too soon.
+ */
+const liveCodexLimits = async ($: EngineInterface, force: boolean): Promise<CodexLimits | null> => {
+  const now = await $.clock.now()
+  if (!force && now - liveAskedAt < LIVE_EVERY_MS) return null
+  liveAskedAt = now
+  const home = await homeDir($)
+  if (home === null) return null
+  const helper = `${home}/.claude/delegation/codex-limits.mjs`
+  if (!(await $.fs.exists(helper))) return null
+  const ran = await $.process.run(['node', helper])
+  return ran.exitCode === 0 ? parseLiveLimits(ran.stdout) : null
+}
+
+/** Live numbers first, then the newest session log that recorded any; a failed read keeps what was shown. */
+const refreshCodexLimits = async ($: EngineInterface, force = false) => {
+  const live = await liveCodexLimits($, force).catch(() => null)
+  const found = live ?? (await readCodexLimits($))
   await update($, codexLimits, current => found ?? current)
 }
 
@@ -552,27 +721,36 @@ const setMode = async ($: EngineInterface, pick?: string): Promise<string> => {
 
 type Todo = { content: string; status: string; activeForm: string }
 
-const USAGE = `Usage: /usage-hud [theme <${THEME_NAMES.join('|')}> | model <opus|sonnet|haiku|fable|auto> | effort <${EFFORTS.join('|')}|auto> | mode [name]]`
+const USAGE = `Usage: /usage-hud [theme <${THEME_NAMES.join('|')}> | model <opus|sonnet|haiku|fable|auto> | effort <${EFFORTS.join('|')}|auto> | mode [name] | engine <claude|codex|status> | codex <model|effort|default> | auto [on|off|status|switch|downgrade|compact|fallback] [value]]`
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'usage-hud',
-      description: 'Toggle the usage HUD; or set theme, model, effort or mode',
-      argumentHint: '[theme|model|effort|mode] [value]',
+      description: 'Toggle the HUD; switch directly between Claude and Codex with shared context',
+      argumentHint: '[engine|theme|model|effort|mode] [value]',
     })
 
     try {
-      const [savedTheme, savedModel, savedEffort, savedHidden] = await Promise.all([
+      const { state } = await loadDirect($)
+      await update($, directEngine, () => state.engine)
+    } catch { /* no bound session yet */ }
+
+    try {
+      const [savedTheme, savedModel, savedEffort, savedHidden, savedAuto, savedSwitched] = await Promise.all([
         $.store.get('theme'),
         $.store.get('modelOverride'),
         $.store.get('effortOverride'),
         $.store.get('isHidden'),
+        $.store.get('autoConfig'),
+        $.store.get('autoSwitched'),
       ])
+      if (savedSwitched === true) await update($, autoSwitched, () => true)
       if (typeof savedTheme === 'string' && isThemeName(savedTheme)) await update($, theme, () => savedTheme)
       if (typeof savedModel === 'string' && MODEL_IDS.includes(savedModel)) await update($, modelOverride, () => savedModel)
       if (typeof savedEffort === 'string' && isEffort(savedEffort)) await update($, effortOverride, () => savedEffort)
       if (typeof savedHidden === 'boolean') await update($, isHidden, () => savedHidden)
+      if (savedAuto && typeof savedAuto === 'object') await update($, autoConfig, () => ({ ...DEFAULT_AUTO, ...(savedAuto as Partial<AutoConfig>) }))
     } catch {
       // settings keep their defaults when the store cannot be read
     }
@@ -614,6 +792,64 @@ export const register: Register = on => {
         return last?.pct === sample.pct ? list : [...list, sample].slice(-30)
       })
     }
+
+    // ---- autopilot ----
+    try {
+      const cfg = await read($, autoConfig)
+      const fivePct = five?.percentUsed ?? 0
+      const ctxPct = e.context.percent ?? 0
+
+      // Auto-switch engine to Codex when the 5h or 7 day limit is high, and back after the reset
+      await autoEngine($, claudePct(e.rateLimits, await $.clock.now()))
+
+      // Auto-downgrade model at thresholds
+      if (cfg.downgradeEnabled && !(await read($, autoDownDisabled))) {
+        const override = await read($, modelOverride)
+        const actual = (await read($, model))?.model ?? ''
+        const origModel = await read($, autoOrigModel)
+
+        if (fivePct >= 85 && actual !== 'claude-haiku-5-5' && override !== 'claude-haiku-5-5') {
+          if (origModel === null) await update($, autoOrigModel, () => override ?? '__auto__')
+          await setModel($, 'claude-haiku-5-5')
+          $.ui.toast(`⚡ Auto-pilot: model → Haiku (5h at ${Math.round(fivePct)}%)`)
+        } else if (fivePct >= 70 && fivePct < 85 && (actual === 'claude-opus-5-5' || override === 'claude-opus-5-5')) {
+          if (origModel === null) await update($, autoOrigModel, () => override ?? '__auto__')
+          await setModel($, 'claude-sonnet-5-5')
+          $.ui.toast(`⚡ Auto-pilot: Opus → Sonnet (5h at ${Math.round(fivePct)}%)`)
+        }
+
+        // Restore original model when limit resets below 60%
+        if (fivePct < 60 && origModel !== null) {
+          const restoreTo = origModel === '__auto__' ? null : origModel
+          await setModel($, restoreTo)
+          await update($, autoOrigModel, () => null)
+          $.ui.toast(`✅ Auto-pilot: model restored to ${modelButton(restoreTo)}`)
+        }
+      }
+      // Re-enable auto-downgrade when limit drops below 60%
+      if (fivePct < 60 && await read($, autoDownDisabled)) {
+        await update($, autoDownDisabled, () => false)
+      }
+
+      // Auto-compact context
+      if (cfg.compactThreshold > 0 && ctxPct >= cfg.compactThreshold && !(await read($, autoCompacted))) {
+        // The flag is set only once compaction ran, so a skip or failure retries on the next measurement.
+        const result = await $.session.compact()
+        if (result.skip !== undefined) {
+          $.ui.toast(`Auto-compact skipped: ${result.skip}`)
+        } else {
+          await update($, autoCompacted, () => true)
+          $.ui.toast(`⚡ Auto-pilot: compacted context (was ${Math.round(ctxPct)}% full)`)
+        }
+      }
+      // Reset compact flag when context drops after compaction
+      if (ctxPct < (cfg.compactThreshold > 0 ? cfg.compactThreshold - 10 : 70)) {
+        await update($, autoCompacted, () => false)
+      }
+    } catch {
+      // autopilot must never block a measurement
+    }
+
     return next(e)
   })
 
@@ -694,10 +930,53 @@ export const register: Register = on => {
   on('prompt.submit', async ($, e, next) => {
     const kind = e.origin?.kind
     const isOwn = e.isMeta !== true && e.command === undefined && (kind === undefined || kind === 'composer' || kind === 'bridge' || kind === 'sdk')
-    if (!isOwn) return next(e)
+    if (!isOwn || e.text.trimStart().startsWith('/')) return next(e)
+    // In Codex mode Claude makes no calls, so its limits go stale: re-read them so the way back to Claude opens at the reset.
+    if (await read($, directEngine) === 'codex' && await read($, autoSwitched)) {
+      try {
+        const usage = await $.session.usage()
+        await update($, limits, () => usage.rateLimits)
+      } catch { /* a stale reading still ends at the reset time */ }
+      await autoEngine($, claudePct(await read($, limits), await $.clock.now())).catch(() => undefined)
+    }
+    // Auto-fallback: route to Codex when Claude is at 100%
+    if (await read($, directEngine) === 'claude') {
+      try {
+        const cfg = await read($, autoConfig)
+        if (cfg.fallbackEnabled && !directBusy) {
+          const now = await $.clock.now()
+          const full = (await read($, limits)).some(l => (l.kind === 'five_hour' || l.kind === 'seven_day') && limitPct(l, now) >= 100)
+          if (full) {
+            await switchEngine($, 'codex')
+            await setAutoSwitched($, true)
+            $.ui.toast('⚡ Auto-pilot: Claude at 100% — routing to Codex')
+          }
+        }
+      } catch { /* fallback must not block the prompt */ }
+    }
+    if (await read($, directEngine) === 'codex') {
+      if (directBusy) return { drop: 'Codex is already working. Wait for it to finish before sending another prompt.' }
+      if (e.attachments && Object.keys(e.attachments).length > 0) {
+        return { drop: 'Direct Codex currently accepts text and project file paths. Attachments were not sent; use their local file paths instead.' }
+      }
+      directBusy = true
+      try {
+        await update($, directStatus, () => 'Codex is starting…')
+        const r = await refreshRouting($)
+        const mode = await findModeRow($)
+        await runDirect($, e.text, { model: r.codexModel, effort: r.codexEffort, readOnly: mode === undefined || /plan/i.test(String(mode.value)) || await read($, autoSwitched) }, // an automatic switch never writes
+          async text => { await update($, directStatus, () => text) })
+        await update($, directStatus, () => 'Codex finished · context saved')
+        return { drop: 'Answered by Codex. Context saved in this conversation.' }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        await update($, directStatus, () => 'Codex stopped · ' + message.slice(0,180))
+        return { drop: message }
+      } finally { directBusy = false }
+    }
     const r = await refreshRouting($)
-    return next({ ...e, context: [...(e.context ?? []), routeContext(r)] })
-  }).catch(($, e, next) => next(e))
+    return next({ ...e, context: [...(e.context ?? []), routeContext(r, await readUsage($))] })
+  }).catch(() => ({ drop: 'Usage HUD could not route this prompt safely. It was not sent to Claude. Reload the plugin and try again.' }))
 
   // Worker activity, only where it is observable: a foreground Bash call that starts with codex exec.
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
@@ -714,7 +993,7 @@ export const register: Register = on => {
       return ran
     } finally {
       await update($, worker, () => null)
-      await refreshCodexLimits($).catch(() => undefined)
+      await refreshCodexLimits($, true).catch(() => undefined) // the run just spent some: ask Codex now
     }
   }).catch(($, e, next) => next(e))
 
@@ -729,9 +1008,37 @@ export const register: Register = on => {
       await $.store.set('isHidden', hidden)
       return { text: hidden ? 'Usage HUD hidden.' : 'Usage HUD shown.' }
     }
+    if (sub === 'engine') {
+      if (arg === 'claude' || arg === 'codex') return { text: await switchEngine($, arg, true) }
+      const { state } = await loadDirect($)
+      return { text: 'Engine: ' + state.engine + '. Codex thread: ' + (state.threadId ?? 'not started') +
+        (state.pending ? '. Last request is pending or interrupted; inspect changes before continuing.' : '') +
+        '. Use /usage-hud engine claude or /usage-hud engine codex.' }
+    }
     if (sub === 'theme' && isThemeName(arg)) {
       await setTheme($, arg)
       return { text: `Usage HUD theme: ${arg}.` }
+    }
+    // With Codex as the engine, model and effort mean Codex's; the same thread is resumed with the new values.
+    if (sub === 'codex' || ((sub === 'model' || sub === 'effort') && (await read($, directEngine)) === 'codex')) {
+      const isEffortCmd = sub === 'effort' || (sub === 'codex' && isEffort(rest[0] ?? '') && rest[0] !== undefined)
+      if (isEffortCmd) {
+        const v = sub === 'codex' ? rest[0] : arg
+        if (v !== undefined && (v === 'auto' || v === 'default' || isEffort(v))) {
+          const level = isEffort(v) ? v : null
+          await setCodexEffort($, level)
+          return { text: `Codex effort: ${level ?? 'default'} (from the next request, same Codex thread).` }
+        }
+      } else {
+        const m = sub === 'codex' ? rest.join(' ') : arg
+        const isDefault = m === 'auto' || m === 'default'
+        const id = isDefault ? null : findCodexModel(m)
+        if (isDefault || id !== undefined) {
+          await setCodexModel($, id ?? null)
+          return { text: `Codex model: ${id ?? 'account default'} (from the next request, same Codex thread).` }
+        }
+      }
+      return { text: `Codex models: ${CODEX_MODELS.join(', ')}, default. Efforts: ${EFFORTS.join(', ')}. Use /usage-hud codex <model|effort>.` }
     }
     if (sub === 'model' && (isAuto || findModel(arg))) {
       const id = isAuto ? null : (findModel(arg) ?? null)
@@ -751,6 +1058,45 @@ export const register: Register = on => {
           ? `Mode: ${String(row.value)}. Options: ${(row.options ?? []).join(', ')}.`
           : 'The permission mode cannot be listed from a mod here; use shift+tab.',
       }
+    }
+    if (sub === 'auto') {
+      const cfg = await read($, autoConfig)
+      if (arg === '' || arg === 'status') {
+        const sw = cfg.switchThreshold > 0 ? `${cfg.switchThreshold}%` : 'off'
+        const dg = cfg.downgradeEnabled ? 'on (opus→sonnet@70%, →haiku@85%)' : 'off'
+        const cp = cfg.compactThreshold > 0 ? `${cfg.compactThreshold}%` : 'off'
+        const fb = cfg.fallbackEnabled ? 'on' : 'off'
+        return { text: `Auto-pilot: switch engine at ${sw}, downgrade model ${dg}, compact at ${cp}, fallback ${fb}.` }
+      }
+      const parts = arg.split(/\s+/)
+      const feature = parts[0]
+      const val = parts[1] ?? ''
+      const nextCfg: Partial<AutoConfig> = {}
+      if (feature === 'switch') {
+        if (val === 'off') nextCfg.switchThreshold = 0
+        else { const n = parseInt(val); if (n >= 50 && n <= 99) nextCfg.switchThreshold = n; else return { text: 'auto switch <50-99|off>' } }
+      } else if (feature === 'downgrade') {
+        if (val === 'on') nextCfg.downgradeEnabled = true
+        else if (val === 'off') nextCfg.downgradeEnabled = false
+        else return { text: 'auto downgrade <on|off>' }
+      } else if (feature === 'compact') {
+        if (val === 'off') nextCfg.compactThreshold = 0
+        else { const n = parseInt(val); if (n >= 50 && n <= 99) nextCfg.compactThreshold = n; else return { text: 'auto compact <50-99|off>' } }
+      } else if (feature === 'fallback') {
+        if (val === 'on') nextCfg.fallbackEnabled = true
+        else if (val === 'off') nextCfg.fallbackEnabled = false
+        else return { text: 'auto fallback <on|off>' }
+      } else if (feature === 'on') {
+        Object.assign(nextCfg, DEFAULT_AUTO)
+      } else if (feature === 'off') {
+        nextCfg.switchThreshold = 0; nextCfg.downgradeEnabled = false; nextCfg.compactThreshold = 0; nextCfg.fallbackEnabled = false
+      } else {
+        return { text: 'auto [on|off|switch <50-99|off>|downgrade <on|off>|compact <50-99|off>|fallback <on|off>]' }
+      }
+      const updated = { ...cfg, ...nextCfg }
+      await update($, autoConfig, () => updated)
+      await $.store.set('autoConfig', updated)
+      return { text: `Auto-pilot updated. ${feature}: ${val || (feature === 'on' ? 'all enabled' : 'all disabled')}.` }
     }
     return { text: USAGE }
   })
@@ -785,7 +1131,9 @@ export const register: Register = on => {
       read($, worker),
       read($, lastWorker),
     ])
-    const [cxModel, cxEffort, cxLimits] = await Promise.all([read($, codexModel), read($, codexEffort), read($, codexLimits)])
+    const [cxModel, cxEffort, cxLimits, autoCfg] = await Promise.all([read($, codexModel), read($, codexEffort), read($, codexLimits), read($, autoConfig)])
+    const activeEngine = await read($, directEngine)
+    const activeStatus = await read($, directStatus)
     const th = THEMES[themeName]
     // One look for every "name  value" pair: accent name padded to a column, bright value.
     const name = (text: string, width: number) => <Text color={hex(th.accent)}>{text.padEnd(width)}</Text>
@@ -856,20 +1204,26 @@ export const register: Register = on => {
     ].join(' · ')
 
     const controls = [
+      { key: 'engine', name: 'Engine', value: activeEngine, onPress: async () => {
+        $.ui.toast(await switchEngine($, activeEngine === 'claude' ? 'codex' : 'claude', true))
+      } },
       { key: 'theme', name: 'Theme', value: themeName, onPress: () => setTheme($, nextTheme(themeName)) },
       {
         key: 'model',
-        name: 'Model',
-        value: modelButton(pickedModel),
-       
-        onPress: () => setModel($, cycle(MODEL_IDS, pickedModel)),
+        name: activeEngine === 'codex' ? 'Model·Cx' : 'Model',
+        // one Model button: it drives whichever engine is active
+        value: activeEngine === 'codex' ? codexModelButton(cxModel) : modelButton(pickedModel),
+        onPress: activeEngine === 'codex'
+          ? () => setCodexModel($, cycle(CODEX_MODEL_IDS, cxModel))
+          : async () => { await setModel($, cycle(MODEL_IDS, pickedModel)); await update($, autoDownDisabled, () => true); await update($, autoOrigModel, () => null) },
       },
       {
         key: 'effort',
-        name: 'Effort',
-        value: pickedEffort ?? 'auto',
-       
-        onPress: () => setEffort($, cycle(EFFORTS, pickedEffort)),
+        name: activeEngine === 'codex' ? 'Effort·Cx' : 'Effort',
+        value: activeEngine === 'codex' ? (cxEffort ?? 'default') : (pickedEffort ?? 'auto'),
+        onPress: activeEngine === 'codex'
+          ? () => setCodexEffort($, cycle(EFFORTS, cxEffort))
+          : () => setEffort($, cycle(EFFORTS, pickedEffort)),
       },
       {
         key: 'mode',
@@ -883,14 +1237,25 @@ export const register: Register = on => {
       },
       // Delegation to the Codex worker CLI; Claude's own model stays the Model control's.
       { key: 'route', name: 'Route', value: routeName, onPress: () => setRoute($, nextRoute(routeName)) },
-      {
-        key: 'codexModel',
-        name: 'Codex',
-        value: codexModelButton(cxModel),
-        // a hand-set model outside the list goes back to the default
-        onPress: () => setCodexModel($, cycle(CODEX_MODEL_IDS, cxModel)),
-      },
-      { key: 'codexEffort', name: 'Cx eff', value: cxEffort ?? 'default', onPress: () => setCodexEffort($, cycle(EFFORTS, cxEffort)) },
+      // These set the model Claude delegates to; with Codex as the engine, Model and Effort above already do that.
+      ...(activeEngine === 'codex' ? [] : [
+        {
+          key: 'codexModel',
+          name: 'Codex',
+          value: codexModelButton(cxModel),
+          // a hand-set model outside the list goes back to the default
+          onPress: () => setCodexModel($, cycle(CODEX_MODEL_IDS, cxModel)),
+        },
+        { key: 'codexEffort', name: 'Cx eff', value: cxEffort ?? 'default', onPress: () => setCodexEffort($, cycle(EFFORTS, cxEffort)) },
+      ]),
+      { key: 'autopilot', name: 'Auto', value: isAutoOn(autoCfg) ? '✦ on' : 'off',
+        onPress: async () => {
+          const isOn = isAutoOn(autoCfg)
+          const toggledCfg = isOn ? { switchThreshold: 0, downgradeEnabled: false, compactThreshold: 0, fallbackEnabled: false } : { ...DEFAULT_AUTO }
+          await update($, autoConfig, () => toggledCfg)
+          await $.store.set('autoConfig', toggledCfg)
+          $.ui.toast(isOn ? 'Auto-pilot off' : '⚡ Auto-pilot on (switch@85%, downgrade, compact@85%, fallback)')
+        } },
     ]
 
     return (
@@ -933,6 +1298,7 @@ export const register: Register = on => {
 
         <Box flexDirection="column" marginLeft={isWide ? 2 : 0} flexGrow={1}>
           <Text dimColor bold>NOW</Text>
+          <Text wrap="truncate-end">{name('engine', 8)}{value(activeEngine)}{activeStatus ? ' · ' + activeStatus : ''}</Text>
           <Text>
             {name('model', 8)}
             {value(modelLine)}

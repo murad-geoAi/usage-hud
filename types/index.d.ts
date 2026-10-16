@@ -41,6 +41,8 @@ export type WorkerDone = { name: WorkerName; ms: number; outcome: 'ok' | 'failed
 declare module 'claude-code' {
   interface PluginState {
     'usage-hud': {
+      directEngine: 'claude' | 'codex'
+      directStatus: string
       limits: Limit[]
       model: ModelInfo | null
       tasks: Tasks | null
@@ -86,6 +88,13 @@ declare module 'claude-code' {
       codexEffort: EffortName | null
       /** Codex's 5h and weekly limits as last read, null when none was found. */
       codexLimits: CodexLimits | null
+      autoConfig: { switchThreshold: number; downgradeEnabled: boolean; compactThreshold: number; fallbackEnabled: boolean }
+      autoSwitched: boolean
+      /** The user chose Claude by hand: autopilot keeps off Codex until the limit drops below 50%. */
+      switchSuppressed: boolean
+      autoOrigModel: string | null
+      autoDownDisabled: boolean
+      autoCompacted: boolean
     }
   }
 }

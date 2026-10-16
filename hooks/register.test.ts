@@ -17,13 +17,16 @@ import {
   findModel,
   formatEta,
   modelButton,
+  measuredPct,
   money,
   nextRoute,
   nextTheme,
   pace,
   parseCodexLimits,
+  parseLiveLimits,
   parseRoute,
   parseRouting,
+  pressureOf,
   prettyModel,
   resetsIn,
   routeContext,
@@ -271,6 +274,36 @@ test('route preference parses, cycles and keeps other keys', () => {
   expect(ctx).not.toContain('Gemini')
 })
 
+test('the routing block carries usage and a pressure level, and omits them without a reading', () => {
+  const r = { preference: 'auto', codexModel: null, codexEffort: null } as const
+  const none = { claude5h: null, claudeWk: null, codex5h: null, codexWk: null }
+  expect(routeContext(r)).not.toContain('usage ')
+  expect(pressureOf(none)).toBe('unknown')
+  expect(pressureOf({ ...none, claude5h: 10, claudeWk: 59.4 })).toBe('low')
+  expect(pressureOf({ ...none, claude5h: 10, claudeWk: 60 })).toBe('medium') // the fuller window decides
+  expect(pressureOf({ ...none, claudeWk: 85 })).toBe('high') // one exhausted window is enough
+  expect(pressureOf({ ...none, claude5h: 20 })).toBe('unknown') // a missing window may hide a full one
+  const ctx = routeContext(r, { claude5h: 72.4, claudeWk: 41, codex5h: null, codexWk: 5 })
+  expect(ctx).toContain('usage claude5h=72% claudeWeek=41% codex5h=? codexWeek=5% pressure=medium.')
+  expect(ctx.indexOf('usage ')).toBeGreaterThan(ctx.indexOf('codexEffort=default'))
+})
+
+test('live Codex limits parse from the helper line and reject anything malformed', () => {
+  const line = '{"fiveHour":{"pct":2,"resetsAt":1792184311000},"weekly":{"pct":16,"resetsAt":1792686664000},"seenAt":1792167596481,"plan":"plus"}'
+  expect(parseLiveLimits(`warning on a line before\n${line}\n`)).toEqual({
+    fiveHour: { pct: 2, resetsAt: 1792184311000 },
+    weekly: { pct: 16, resetsAt: 1792686664000 },
+    seenAt: 1792167596481,
+    plan: 'plus',
+  })
+  expect(parseLiveLimits('{"fiveHour":null,"weekly":{"pct":16,"resetsAt":5},"seenAt":1,"plan":null}')?.fiveHour).toBe(null)
+  expect(parseLiveLimits('{"fiveHour":null,"weekly":null,"seenAt":1}')).toBe(null) // no limits at all
+  expect(parseLiveLimits('{"fiveHour":{"pct":"2","resetsAt":1},"weekly":null,"seenAt":1}')).toBe(null) // wrong types
+  expect(parseLiveLimits('{"fiveHour":{"pct":2,"resetsAt":1},"weekly":null}')).toBe(null) // no timestamp
+  expect(parseLiveLimits('not json')).toBe(null)
+  expect(parseLiveLimits('')).toBe(null)
+})
+
 test('codex model and effort parse from routing.json', () => {
   expect(parseRouting(undefined)).toEqual({ preference: 'auto', codexModel: null, codexEffort: null })
   expect(parseRouting('{"codexModel":"gpt-6-astra","codexEffort":"high"}')).toEqual({
@@ -310,6 +343,10 @@ test('codex limits come from the last rollout line that has them', () => {
   // a window past its reset is empty
   expect(windowPct({ pct: 90, resetsAt: 1000 }, 2000)).toBe(0)
   expect(windowPct(null, 2000)).toBe(null)
+  // ...but for routing it is unknown, not zero: Codex may have been used since the reading
+  expect(measuredPct({ pct: 90, resetsAt: 1000 }, 2000)).toBe(null)
+  expect(measuredPct({ pct: 90, resetsAt: 3000 }, 2000)).toBe(90)
+  expect(measuredPct(null, 2000)).toBe(null)
   expect(codexLine(null, 0)).toContain('no data')
   const line = codexLine(found, 1792000000000)
   expect(line).toContain('5h ▱▱▱▱ 8%')
@@ -436,4 +473,48 @@ test('a full context shows the compact button and the 5h line shows the pace', a
   expect((await ui.find({ key: 'compact' }))?.text).toContain('compact now')
   expect(await ui.find({ text: /pace steady/ })).toBeDefined()
   expect(await ui.find({ text: /of 200k tokens/ })).toBeDefined()
+})
+
+
+test('direct Engine switch intercepts prompts locally and fails closed without Claude', async ($, on) => {
+  mock.store(on)
+  mock.env(on, {})
+  on('config.list', () => ({ value: [] }))
+  on('session.id', () => ({ value: 'direct-test-session' }))
+  on('session.cwd', () => ({ value: 'D:/project' }))
+  on('session.messages', () => ({ value: { deny: 'Context temporarily unavailable' } }))
+  let claudeCalls = 0
+  on('prompt.submit', ($, e) => { claudeCalls++; return { text: e.text } })
+  const run = (args: string) => $.command.run({ command: 'usage-hud', args, origin: { kind: 'composer' }, presentation: { layout: 'main', columns: 120 } } as never)
+  expect((await run('engine codex')).text).toContain('Engine: Codex')
+  const result = await $.prompt.submit({ text: 'Continue my task.', asUser: true })
+  expect(result.drop).toContain('conversation context')
+  expect(claudeCalls).toBe(0)
+  expect((await run('engine claude')).text).toContain('Engine: Claude')
+  await $.prompt.submit({ text: 'Continue in Claude.', asUser: true })
+  expect(claudeCalls).toBe(1)
+})
+
+test('with the Codex engine the Model and Effort buttons and commands drive Codex', async ($, on) => {
+  mock.store(on)
+  mock.clock(on, { now: Date.UTC(2026, 9, 9, 12) })
+  on('config.list', () => ({ value: [] }))
+  on('session.id', () => ({ value: 'switch-session' }))
+  on('session.cwd', () => ({ value: 'D:/project' }))
+  const files = fakeFiles(on, { [ROUTING]: '{"preference":"claude"}' })
+  const run = (args: string) => $.command.run({ command: 'usage-hud', args, origin: { kind: 'composer' }, presentation: { layout: 'main', columns: 120 } } as never)
+  expect((await run('engine codex')).text).toContain('Engine: Codex')
+  const ui = await mountBand($)
+  await ui.press({ key: 'model' })
+  expect(JSON.parse(files[ROUTING] ?? '').codexModel).toBe('gpt-6-astra')
+  await ui.press({ key: 'effort' })
+  expect(JSON.parse(files[ROUTING] ?? '').codexEffort).toBe('low')
+  expect((await run('model terra')).text).toContain('gpt-5.6-terra')
+  expect(JSON.parse(files[ROUTING] ?? '').codexModel).toBe('gpt-5.6-terra')
+  expect((await run('codex 5.6-luna')).text).toContain('gpt-5.6-luna')
+  expect((await run('codex high')).text).toContain('high')
+  expect(JSON.parse(files[ROUTING] ?? '')).toMatchObject({ preference: 'claude', codexModel: 'gpt-5.6-luna', codexEffort: 'high' })
+  expect((await run('codex default')).text).toContain('account default')
+  expect((await run('engine claude')).text).toContain('Engine: Claude')
+  expect((await run('model sonnet')).text).toContain('sonnet')
 })
