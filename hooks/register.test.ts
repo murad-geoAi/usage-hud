@@ -270,7 +270,8 @@ test('route preference parses, cycles and keeps other keys', () => {
   expect(JSON.parse(withRouting('[1]', { preference: 'claude' }))).toEqual({ preference: 'claude' })
   const ctx = routeContext({ preference: 'codex', codexModel: 'gpt-6.1-sol', codexEffort: null })
   expect(ctx).toContain('preference=codex codexModel=gpt-6.1-sol codexEffort=default')
-  expect(ctx).toContain("not Claude Code's model")
+  expect(ctx).toContain("not Claude's model")
+  expect(ctx.length).toBeLessThan(220) // it rides along with every prompt, so it stays short
   expect(ctx).not.toContain('Gemini')
 })
 
@@ -356,6 +357,9 @@ test('codex limits come from the last rollout line that has them', () => {
 test('worker commands are recognised only at the start', () => {
   expect(workerOf('codex exec --sandbox read-only - < task.md')).toBe('codex')
   expect(workerOf('  codex exec -m gpt-6.1-sol -c model_reasoning_effort=high - < t.md')).toBe('codex')
+  expect(workerOf('node ~/.claude/delegation/delegate.mjs <<\'EOF\'')).toBe('codex')
+  expect(workerOf('node C:/Users/x/.claude/delegation/delegate.mjs task.md')).toBe('codex')
+  expect(workerOf('node other.mjs')).toBe(null)
   expect(workerOf('codex login status')).toBe(null)
   // Antigravity and Gemini CLI are no longer workers
   expect(workerOf('agy -p "x"')).toBe(null)

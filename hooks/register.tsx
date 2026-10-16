@@ -46,9 +46,9 @@ const setAutoSwitched = async ($: EngineInterface, value: boolean) => {
 const limitPct = (l: Limit, now: number): number =>
   l.resetsAt !== undefined && Date.parse(l.resetsAt) <= now ? 0 : l.percentUsed
 
-/** The fuller of the 5h and 7 day limits: either one ending Claude's use counts. */
-const claudePct = (list: readonly Limit[], now: number): number =>
-  Math.max(0, ...list.filter(l => l.kind === 'five_hour' || l.kind === 'seven_day').map(l => limitPct(l, now)))
+/** The 5h window alone: the engine switch balances short bursts, so a high weekly total must not pin Codex. */
+const fiveHourPct = (list: readonly Limit[], now: number): number =>
+  Math.max(0, ...list.filter(l => l.kind === 'five_hour').map(l => limitPct(l, now)))
 
 /** The current readings for the routing block, or undefined when nothing has been measured yet. */
 const readUsage = async ($: EngineInterface): Promise<UsageReading | undefined> => {
@@ -71,13 +71,15 @@ const readUsage = async ($: EngineInterface): Promise<UsageReading | undefined> 
   }
 }
 
-/** Flips to Codex when Claude's limits run high and Codex has room, and back once they fall below 50%. */
+/** Flips to Codex when Claude's limits run high and Codex has room, and back once the 5h window falls 10 points under the trigger. */
 async function autoEngine($: EngineInterface, pct: number) {
   const cfg = await read($, autoConfig)
   if (cfg.switchThreshold <= 0 || directBusy) return
   const now = await $.clock.now()
   const [switched, suppressed, engine, cx] = await Promise.all([read($, autoSwitched), read($, switchSuppressed), read($, directEngine), read($, codexLimits)])
-  if (pct < 50 && suppressed) await update($, switchSuppressed, () => false)
+  // Back to Claude 10 points under the trigger (the 5h reset normally does it), so it cannot flap at the line.
+  const back = Math.max(5, cfg.switchThreshold - 10)
+  if (pct < back && suppressed) await update($, switchSuppressed, () => false)
   if (!switched && !suppressed && engine === 'claude' && pct >= cfg.switchThreshold) {
     // Unknown Codex capacity is not free capacity: only switch on a reading.
     const cxKnown = cx === null ? [] : [measuredPct(cx.fiveHour, now), measuredPct(cx.weekly, now)].filter((p): p is number => p !== null)
@@ -87,7 +89,7 @@ async function autoEngine($: EngineInterface, pct: number) {
     await switchEngine($, 'codex')
     await setAutoSwitched($, true)
     $.ui.toast(`⚡ Auto-pilot: engine → Codex, read-only (Claude at ${Math.round(pct)}%)`)
-  } else if (switched && pct < 50) {
+  } else if (switched && pct < back) {
     if (engine === 'codex') await switchEngine($, 'claude')
     await setAutoSwitched($, false)
     $.ui.toast('✅ Auto-pilot: Claude limit reset — engine → Claude')
@@ -135,10 +137,14 @@ type AutoConfig = {
   compactThreshold: number   // 0 = disabled; auto-compact context at this %
   fallbackEnabled: boolean   // auto-route to codex when claude hits 100%
 }
-const DEFAULT_AUTO: AutoConfig = { switchThreshold: 85, downgradeEnabled: true, compactThreshold: 85, fallbackEnabled: true }
+const DEFAULT_AUTO: AutoConfig = { switchThreshold: 50, downgradeEnabled: true, compactThreshold: 85, fallbackEnabled: true }
 const autoConfig = atom({ plugin: 'usage-hud', key: 'autoConfig' } as const, { ...DEFAULT_AUTO })
 const autoSwitched = atom({ plugin: 'usage-hud', key: 'autoSwitched' } as const, false)
 const switchSuppressed = atom({ plugin: 'usage-hud', key: 'switchSuppressed' } as const, false)
+const COMPACT_TOKENS = 150_000 // auto-compact above this many context tokens, whatever the window size
+const IDLE_CACHE_MS = 55 * 60_000 // the prompt cache lapses after about an hour idle; the next call then re-writes the whole context
+const IDLE_WARN_TOKENS = 60_000
+let lastTurnAt = 0
 const autoOrigModel = atom({ plugin: 'usage-hud', key: 'autoOrigModel' } as const, null as string | null)
 const autoDownDisabled = atom({ plugin: 'usage-hud', key: 'autoDownDisabled' } as const, false)
 const autoCompacted = atom({ plugin: 'usage-hud', key: 'autoCompacted' } as const, false)
@@ -251,14 +257,13 @@ export const withRouting = (text: string | undefined, patch: Partial<Routing>): 
 
 /** The worker a Bash command starts: it must begin with `codex exec`. */
 export const workerOf = (command: string): WorkerName | null =>
-  /^\s*codex\s+exec\b/.test(command) ? 'codex' : null
+  /^\s*(?:codex\s+exec\b|node\s+\S*delegate\.mjs\b)/.test(command) ? 'codex' : null
 
 /** What the model reads beside each typed prompt. */
 export const routeContext = ({ preference, codexModel: m, codexEffort: eff }: Routing, usage?: UsageReading): string =>
   `[delegation-routing] preference=${preference} codexModel=${m ?? 'default'} codexEffort=${eff ?? 'default'}. ` +
   (usage === undefined ? '' : `${usageLine(usage)} `) +
-  `This is the user's routing preference for the Codex worker CLI, set in Usage HUD. It is not Claude Code's model. ` +
-  `Apply the delegation-orchestration rules in ~/.claude/CLAUDE.md.`
+  `Codex routing only, not Claude's model. Rules: ~/.claude/CLAUDE.md.`
 
 /** Percent used per window, null where there is no reading. */
 export type UsageReading = { claude5h: number | null; claudeWk: number | null; codex5h: number | null; codexWk: number | null }
@@ -800,7 +805,7 @@ export const register: Register = on => {
       const ctxPct = e.context.percent ?? 0
 
       // Auto-switch engine to Codex when the 5h or 7 day limit is high, and back after the reset
-      await autoEngine($, claudePct(e.rateLimits, await $.clock.now()))
+      await autoEngine($, fiveHourPct(e.rateLimits, await $.clock.now()))
 
       // Auto-downgrade model at thresholds
       if (cfg.downgradeEnabled && !(await read($, autoDownDisabled))) {
@@ -832,7 +837,9 @@ export const register: Register = on => {
       }
 
       // Auto-compact context
-      if (cfg.compactThreshold > 0 && ctxPct >= cfg.compactThreshold && !(await read($, autoCompacted))) {
+      // Every call re-reads the whole context, so a big window must not let it grow unchecked: also compact at an absolute size.
+      const ctxTokens = (ctxPct / 100) * (e.context.window ?? 0)
+      if (cfg.compactThreshold > 0 && (ctxPct >= cfg.compactThreshold || ctxTokens >= COMPACT_TOKENS) && !(await read($, autoCompacted))) {
         // The flag is set only once compaction ran, so a skip or failure retries on the next measurement.
         const result = await $.session.compact()
         if (result.skip !== undefined) {
@@ -843,7 +850,7 @@ export const register: Register = on => {
         }
       }
       // Reset compact flag when context drops after compaction
-      if (ctxPct < (cfg.compactThreshold > 0 ? cfg.compactThreshold - 10 : 70)) {
+      if (ctxPct < (cfg.compactThreshold > 0 ? cfg.compactThreshold - 10 : 70) && ctxTokens < COMPACT_TOKENS * 0.7) {
         await update($, autoCompacted, () => false)
       }
     } catch {
@@ -855,6 +862,7 @@ export const register: Register = on => {
 
   on('turn.complete', async ($, e, next) => {
     if (e.agentId === undefined) {
+      lastTurnAt = await $.clock.now()
       await refreshBetweenTurns($)
       await addToday($, { turns: 1 })
     }
@@ -931,13 +939,20 @@ export const register: Register = on => {
     const kind = e.origin?.kind
     const isOwn = e.isMeta !== true && e.command === undefined && (kind === undefined || kind === 'composer' || kind === 'bridge' || kind === 'sdk')
     if (!isOwn || e.text.trimStart().startsWith('/')) return next(e)
+    // A long idle gap expires the prompt cache: this prompt would re-write the whole context at the dearer write price.
+    try {
+      const [pct, win, now] = await Promise.all([read($, context), read($, contextWindow), $.clock.now()])
+      if (lastTurnAt > 0 && now - lastTurnAt > IDLE_CACHE_MS && ((pct ?? 0) / 100) * (win ?? 0) > IDLE_WARN_TOKENS) {
+        $.ui.toast(`Idle ${shortSpan(now - lastTurnAt)}: the cache expired, so this prompt re-writes ~${tokensLabel(((pct ?? 0) / 100) * (win ?? 0))} of context. /compact or /clear first is cheaper.`)
+      }
+    } catch { /* a warning must never block a prompt */ }
     // In Codex mode Claude makes no calls, so its limits go stale: re-read them so the way back to Claude opens at the reset.
     if (await read($, directEngine) === 'codex' && await read($, autoSwitched)) {
       try {
         const usage = await $.session.usage()
         await update($, limits, () => usage.rateLimits)
       } catch { /* a stale reading still ends at the reset time */ }
-      await autoEngine($, claudePct(await read($, limits), await $.clock.now())).catch(() => undefined)
+      await autoEngine($, fiveHourPct(await read($, limits), await $.clock.now())).catch(() => undefined)
     }
     // Auto-fallback: route to Codex when Claude is at 100%
     if (await read($, directEngine) === 'claude') {

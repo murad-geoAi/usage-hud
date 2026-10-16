@@ -114,4 +114,6 @@ test('Codex argv keeps model values separate and enforces project sandbox or Pla
   expect(args).toContain('approval_policy="never"')
   expect(args.includes('--dangerously-bypass-approvals-and-sandbox')).toBe(false)
   expect(codexArgs({ ...opts, threadId: null, readOnly: true })).toContain('read-only')
+  expect(args).not.toContain('windows.sandbox="unelevated"')
+  expect(codexArgs({ ...opts, threadId: null, windows: true })).toContain('windows.sandbox="unelevated"')
 })

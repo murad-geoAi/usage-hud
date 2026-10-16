@@ -1,3 +1,38 @@
 # written by Claude Code each time it loads the mod
 .claude-plugin/types/
 tsconfig.json
+
+# secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+credentials*.json
+secrets/
+
+# large files (>50 MB), rasters, model weights, datasets
+*.tif
+*.tiff
+*.img
+*.nc
+*.h5
+*.hdf5
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+*.bin
+*.parquet
+*.zip
+*.7z
+data/
+datasets/
+
+# deps / build
+node_modules/
+dist/

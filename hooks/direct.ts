@@ -92,8 +92,10 @@ export function handoff(rows: string[], previous: string[], resumed: boolean, pr
     `<<HISTORY-${mark}>>\n${context}\n<<END-HISTORY-${mark}>>\n\n<<REQUEST-${mark}>>\n${prompt}\n<<END-REQUEST-${mark}>>`
 }
 
-export function codexArgs(options: { threadId: string | null; model: string | null; effort: string | null; readOnly: boolean }): string[] {
+export function codexArgs(options: { threadId: string | null; model: string | null; effort: string | null; readOnly: boolean; windows?: boolean }): string[] {
   const args = ['exec', '--sandbox', options.readOnly ? 'read-only' : 'workspace-write', '-c', 'approval_policy="never"', '--skip-git-repo-check']
+  // The elevated Windows sandbox cannot start under Claude Code's process: Codex then cannot write or run anything.
+  if (options.windows) args.push('-c', 'windows.sandbox="unelevated"')
   if (options.model) args.push('-m', options.model)
   if (options.effort) args.push('-c', 'model_reasoning_effort=' + options.effort)
   if (options.threadId) args.push('resume', options.threadId)
@@ -152,7 +154,8 @@ export async function runDirect($: EngineInterface, prompt: string, options: { m
   }
   const rows = contextRows(await $.session.messages({ as: 'api' }))
   const input = handoff(rows, state.cursor, state.threadId !== null, prompt)
-  const command = [...await executable($), ...codexArgs({ ...options, threadId: state.threadId })]
+  const windows = Boolean(await $.env.get('APPDATA'))
+  const command = [...await executable($), ...codexArgs({ ...options, threadId: state.threadId, windows })]
   await appendNote($, '[Usage HUD — user request to Codex]\n' + prompt)
   state.pending = { prompt }
   await $.store.set(key, state)
