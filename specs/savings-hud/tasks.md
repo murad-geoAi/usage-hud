@@ -28,3 +28,5 @@ Size: [S] one file, clear change, < ~50 lines · [M] a few files · [L] design d
 
 ## Blocked
 - (task id — error — what was tried)
+- T3 placement: the Saved segment sits at the end of the Codex row (no new row), with Codex 5h coloured separately.
+- Not verified live: the HUD's `$.env.get('CLAUDE_CODE_SESSION_ID')` (only the unit tests and the fixture run). Check the Session total in a real session before `/check`.
