@@ -18,7 +18,7 @@ Size: [S] one file, clear change, < ~50 lines · [M] a few files · [L] design d
 - [x] T4b [L] `register.tsx` CONTROLS: `Feat` cycle, `Build` mode cycle with hint, Spec/Build/Check/Resume buttons via `$.prompt.fill`; `isFilled: false` → warning toast; tests in `register.test.ts`
   - Done when: AC4, AC5 covered; fill-failure path tested; mode persists across re-render
   - Test: `claude plugin test .` + `claude plugin validate .`
-- [ ] T5 [S] `README.md`: "Spec workflow controls" section (≤ 10 lines)
+- [x] T5 [S] `README.md`: "Spec workflow controls" section (≤ 10 lines)
   - Done when: lists controls and what each button fills
   - Test: `claude plugin validate .`
 

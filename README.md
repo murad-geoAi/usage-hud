@@ -33,6 +33,18 @@ You can toggle or tune Autopilot either by clicking **Auto** in the HUD bar or u
 
 ---
 
+## Spec workflow controls
+
+For projects using `/spec`, `/build`, `/check` and `/resume` (see `CLAUDE.md`). The panel reads `specs/*/tasks.md` after every turn.
+
+- **NOW → spec**: selected feature, progress bar, done/total, blocked count and the next open task.
+- **Feat**: cycles the features (the `feature/<name>` branch is picked by default).
+- **Build**: cycles `split` → `claude` → `codex`; shown as `split (try claude)` when a limit suggests another mode.
+- **/spec /build /check /resume**: put the command in the prompt box (never send it); `/build` and `/resume` carry the Build flag.
+- A warning shows in NOW when the Codex plugin is not installed.
+
+---
+
 ## Direct engine switch
 
 Click **Engine** in the HUD, or run these local commands in Claude Code:
