@@ -4,10 +4,35 @@
 // Output: {"fiveHour":{"pct":2,"resetsAt":<ms>}|null,"weekly":{...}|null,"seenAt":<ms>,"plan":"plus"|null}
 // Exit 1 with a message on stderr when Codex cannot be reached or answers without limits.
 import { spawn } from 'node:child_process'
+import { existsSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { delimiter, isAbsolute, join } from 'node:path'
 
 const TIMEOUT_MS = 15000
-// One constant command string: on Windows `codex` is a .cmd shim, which needs a shell.
-const child = spawn('codex app-server', { stdio: ['pipe', 'pipe', 'ignore'], shell: true })
+
+// A bare `codex` is searched for in the current directory first on Windows, so a project that ships its own
+// codex.cmd could get it run. Resolve it from absolute PATH entries only, and run from the home directory.
+const findCodex = () => {
+  const names = process.platform === 'win32' ? ['codex.exe', 'codex.cmd', 'codex.bat'] : ['codex']
+  for (const dir of (process.env.PATH ?? '').split(delimiter)) {
+    if (!dir || !isAbsolute(dir)) continue
+    for (const name of names) {
+      const path = join(dir, name)
+      if (existsSync(path)) return path
+    }
+  }
+  return null
+}
+const bin = findCodex()
+if (bin === null) {
+  console.error('codex was not found on PATH')
+  process.exit(1)
+}
+const options = { stdio: ['pipe', 'pipe', 'ignore'], cwd: homedir() }
+// Node will not start a .cmd/.bat shim without a shell; the command is the resolved path plus a constant.
+const child = /\.(cmd|bat)$/i.test(bin)
+  ? spawn(`"${bin}" app-server`, { ...options, shell: true })
+  : spawn(bin, ['app-server'], options)
 const fail = message => {
   console.error(message)
   child.kill()
