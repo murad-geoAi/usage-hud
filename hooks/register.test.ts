@@ -480,7 +480,7 @@ test('a full context shows the compact button and the 5h line shows the pace', a
 })
 
 
-test('direct Engine switch intercepts prompts locally and fails closed without Claude', async ($, on) => {
+test('prompts stay with Claude even when the engine is set to Codex', async ($, on) => {
   mock.store(on)
   mock.env(on, {})
   on('config.list', () => ({ value: [] }))
@@ -489,13 +489,10 @@ test('direct Engine switch intercepts prompts locally and fails closed without C
   on('session.messages', () => ({ value: { deny: 'Context temporarily unavailable' } }))
   let claudeCalls = 0
   on('prompt.submit', ($, e) => { claudeCalls++; return { text: e.text } })
-  const run = (args: string) => $.command.run({ command: 'usage-hud', args, origin: { kind: 'composer' }, presentation: { layout: 'main', columns: 120 } } as never)
+  const run = (args: string) => $.command.run({ command: 'usage-hud', args, origin: { kind: 'composer' }, presentation: { layout: 'main', columns: 120 } })
   expect((await run('engine codex')).text).toContain('Engine: Codex')
   const result = await $.prompt.submit({ text: 'Continue my task.', asUser: true })
-  expect(result.drop).toContain('conversation context')
-  expect(claudeCalls).toBe(0)
-  expect((await run('engine claude')).text).toContain('Engine: Claude')
-  await $.prompt.submit({ text: 'Continue in Claude.', asUser: true })
+  expect(result.drop).toBeUndefined()
   expect(claudeCalls).toBe(1)
 })
 

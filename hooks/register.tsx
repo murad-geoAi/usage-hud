@@ -965,62 +965,34 @@ export const register: Register = on => {
 
   // The user's own prompts carry the routing preference, re-read so a change from route.mjs counts at once.
   on('prompt.submit', async ($, e, next) => {
-    const kind = e.origin?.kind
-    const isOwn = e.isMeta !== true && e.command === undefined && (kind === undefined || kind === 'composer' || kind === 'bridge' || kind === 'sdk')
-    if (!isOwn || e.text.trimStart().startsWith('/')) return next(e)
-    // A long idle gap expires the prompt cache: this prompt would re-write the whole context at the dearer write price.
     try {
-      const [pct, win, now] = await Promise.all([read($, context), read($, contextWindow), $.clock.now()])
-      if (lastTurnAt > 0 && now - lastTurnAt > IDLE_CACHE_MS && ((pct ?? 0) / 100) * (win ?? 0) > IDLE_WARN_TOKENS) {
-        $.ui.toast(`Idle ${shortSpan(now - lastTurnAt)}: the cache expired, so this prompt re-writes ~${tokensLabel(((pct ?? 0) / 100) * (win ?? 0))} of context. /compact or /clear first is cheaper.`)
-      }
-    } catch { /* a warning must never block a prompt */ }
-    // In Codex mode Claude makes no calls, so its limits go stale: re-read them so the way back to Claude opens at the reset.
-    if (await read($, directEngine) === 'codex' && await read($, autoSwitched)) {
+      const kind = e.origin?.kind
+      const isOwn = e.isMeta !== true && e.command === undefined && (kind === undefined || kind === 'composer' || kind === 'bridge' || kind === 'sdk')
+      if (!isOwn || e.text.trimStart().startsWith('/')) return next(e)
+      // A long idle gap expires the prompt cache: this prompt would re-write the whole context at the dearer write price.
       try {
-        const usage = await $.session.usage()
-        await update($, limits, () => usage.rateLimits)
-      } catch { /* a stale reading still ends at the reset time */ }
-      await autoEngine($, fiveHourPct(await read($, limits), await $.clock.now())).catch(() => undefined)
-    }
-    // Auto-fallback: route to Codex when Claude is at 100%
-    if (await read($, directEngine) === 'claude') {
-      try {
-        const cfg = await read($, autoConfig)
-        if (cfg.fallbackEnabled && !directBusy) {
-          const now = await $.clock.now()
-          const full = (await read($, limits)).some(l => (l.kind === 'five_hour' || l.kind === 'seven_day') && limitPct(l, now) >= 100)
-          if (full) {
-            await switchEngine($, 'codex')
-            await setAutoSwitched($, true)
-            $.ui.toast('⚡ Auto-pilot: Claude at 100% — routing to Codex')
-          }
+        const [pct, win, now] = await Promise.all([read($, context), read($, contextWindow), $.clock.now()])
+        if (lastTurnAt > 0 && now - lastTurnAt > IDLE_CACHE_MS && ((pct ?? 0) / 100) * (win ?? 0) > IDLE_WARN_TOKENS) {
+          $.ui.toast(`Idle ${shortSpan(now - lastTurnAt)}: the cache expired, so this prompt re-writes ~${tokensLabel(((pct ?? 0) / 100) * (win ?? 0))} of context. /compact or /clear first is cheaper.`)
         }
-      } catch { /* fallback must not block the prompt */ }
-    }
-    if (await read($, directEngine) === 'codex') {
-      if (directBusy) return { drop: 'Codex is already working. Wait for it to finish before sending another prompt.' }
-      if (e.attachments && Object.keys(e.attachments).length > 0) {
-        return { drop: 'Direct Codex currently accepts text and project file paths. Attachments were not sent; use their local file paths instead.' }
+      } catch { /* a warning must never block a prompt */ }
+      // In Codex mode Claude makes no calls, so its limits go stale: re-read them so the way back to Claude opens at the reset.
+      if (await read($, directEngine) === 'codex' && await read($, autoSwitched)) {
+        try {
+          const usage = await $.session.usage()
+          await update($, limits, () => usage.rateLimits)
+        } catch { /* a stale reading still ends at the reset time */ }
+        await autoEngine($, fiveHourPct(await read($, limits), await $.clock.now())).catch(() => undefined)
       }
-      directBusy = true
-      try {
-        await update($, directStatus, () => 'Codex is starting…')
-        const r = await refreshRouting($)
-        const mode = await findModeRow($)
-        await runDirect($, e.text, { model: r.codexModel, effort: r.codexEffort, readOnly: mode === undefined || /plan/i.test(String(mode.value)) || await read($, autoSwitched) }, // an automatic switch never writes
-          async text => { await update($, directStatus, () => text) })
-        await update($, directStatus, () => 'Codex finished · context saved')
-        return { drop: 'Answered by Codex. Context saved in this conversation.' }
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        await update($, directStatus, () => 'Codex stopped · ' + message.slice(0,180))
-        return { drop: message }
-      } finally { directBusy = false }
+      // Prompts always go to Claude: no automatic or intercepted Codex routing here (Codex runs only via /codex:* or delegate.mjs).
+      const r = await refreshRouting($)
+      return next({ ...e, context: [...(e.context ?? []), routeContext(r, await readUsage($))] })
+    } catch (error) {
+      // A prompt is never dropped: log the failure and let the prompt reach Claude unchanged.
+      console.error('usage-hud: prompt routing failed, sending the prompt unchanged', error)
+      return next(e)
     }
-    const r = await refreshRouting($)
-    return next({ ...e, context: [...(e.context ?? []), routeContext(r, await readUsage($))] })
-  }).catch(() => ({ drop: 'Usage HUD could not route this prompt safely. It was not sent to Claude. Reload the plugin and try again.' }))
+  })
 
   // Worker activity, only where it is observable: a foreground Bash call that starts with codex exec.
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
