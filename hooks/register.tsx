@@ -2,6 +2,8 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 import { loadDirect, selectEngine, runDirect } from './direct'
 import type { Engine } from './direct'
+import { codexTone, parseLedger, savedParts, totalsFor } from './savings'
+import type { SavingsTotals, SessionScope } from './savings'
 
 import type {
   CodexLimits,
@@ -128,6 +130,8 @@ const lastWorker = atom({ plugin: 'usage-hud', key: 'lastWorker' } as const, nul
 const codexModel = atom({ plugin: 'usage-hud', key: 'codexModel' } as const, null as string | null)
 const codexEffort = atom({ plugin: 'usage-hud', key: 'codexEffort' } as const, null as EffortName | null)
 const codexLimits = atom({ plugin: 'usage-hud', key: 'codexLimits' } as const, null as CodexLimits | null)
+const savings = atom({ plugin: 'usage-hud', key: 'savings' } as const, null as SavingsTotals | null)
+const savingsScope = atom({ plugin: 'usage-hud', key: 'savingsScope' } as const, null as SessionScope | null)
 
 // ---- autopilot config -------------------------------------------------------
 
@@ -632,6 +636,21 @@ const refreshCodexLimits = async ($: EngineInterface, force = false) => {
   await update($, codexLimits, current => found ?? current)
 }
 
+/** Codex tokens delegated this session and today, from runs/ledger.jsonl (written by delegate.mjs). Null when nothing is readable. */
+const refreshSavings = async ($: EngineInterface) => {
+  const home = await homeDir($)
+  let text = ''
+  try {
+    text = home === null ? '' : ((await $.fs.read(`${home}/.claude/delegation/runs/ledger.jsonl`)) as string)
+  } catch {
+    text = ''
+  }
+  const entries = parseLedger(text)
+  const scope = (await read($, savingsScope)) ?? { id: null, since: 0 }
+  const now = await $.clock.now()
+  await update($, savings, () => (entries.length === 0 ? null : totalsFor(entries, now, scope)))
+}
+
 const readRoutingText = async ($: EngineInterface): Promise<string | undefined> => {
   const path = await routingPath($)
   if (path === null) return undefined
@@ -656,6 +675,7 @@ const refreshBetweenTurns = async ($: EngineInterface) => {
   // file reads first: a failed host read below must not leave them stale
   await refreshRouting($).catch(() => undefined)
   await refreshCodexLimits($).catch(() => undefined)
+  await refreshSavings($).catch(() => undefined)
   const [info, count, row] = await Promise.all([readGit($), $.session.turns(), findModeRow($)])
   await update($, git, () => info)
   await update($, turns, () => count)
@@ -770,6 +790,15 @@ export const register: Register = on => {
       await update($, sessionStart, () => usage.startedAt)
     } catch {
       // no reading yet: the rings show "no data"
+    }
+
+    // The Saved line counts this session's ledger lines by Claude Code's session ID (same env var delegate.mjs reads).
+    try {
+      const raw = ((await $.env.get('CLAUDE_CODE_SESSION_ID')) ?? '').trim()
+      const since = await $.clock.now()
+      await update($, savingsScope, () => ({ id: raw === '' ? null : raw, since }))
+    } catch {
+      // without a scope the session total counts from the first render
     }
 
     await addToday($, {})
@@ -1147,6 +1176,10 @@ export const register: Register = on => {
       read($, lastWorker),
     ])
     const [cxModel, cxEffort, cxLimits, autoCfg] = await Promise.all([read($, codexModel), read($, codexEffort), read($, codexLimits), read($, autoConfig)])
+    const savedTotals = await read($, savings)
+    const savedCodex5h = windowPct(cxLimits?.fiveHour ?? null, now)
+    const saved = savedParts(savedTotals, savedCodex5h)
+    const savedTone = codexTone(savedCodex5h)
     const activeEngine = await read($, directEngine)
     const activeStatus = await read($, directStatus)
     const th = THEMES[themeName]
@@ -1339,6 +1372,8 @@ export const register: Register = on => {
             >
               {codexLine(cxLimits, now)}
             </Text>
+            <Text>{` · ${saved.saved} · `}</Text>
+            <Text color={savedTone === 'bad' ? hex(th.bad) : savedTone === 'warn' ? hex(th.warn) : undefined}>{saved.codex}</Text>
           </Text>
           <Text>
             {name('session', 8)}

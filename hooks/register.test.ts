@@ -522,3 +522,21 @@ test('with the Codex engine the Model and Effort buttons and commands drive Code
   expect((await run('engine claude')).text).toContain('Engine: Claude')
   expect((await run('model sonnet')).text).toContain('sonnet')
 })
+
+test('the codex row shows the Saved line from the delegation ledger', async ($, on) => {
+  mock.store(on)
+  mock.clock(on, { now: Date.UTC(2026, 9, 13, 21) })
+  const day = `${HOME}\\.codex\\sessions\\2026\\10\\13`
+  const ledger = `${Date.UTC(2026, 9, 13, 21) - 60_000}`
+  fakeFiles(on, {
+    [`${day}\\rollout-2026-10-13T14-50-06-a.jsonl`]: `${RATE_LINE}\n`,
+    [`${HOME}\\.codex\\sessions\\2026\\10\\12\\rollout-old.jsonl`]: 'nothing here\n',
+    [`${HOME}\\.claude\\delegation\\runs\\ledger.jsonl`]: `{"at":${ledger},"task":"review","codexTokens":{"input":10000,"output":2000}}\n{broken\n`,
+  })
+  on('session.turns', () => ({ value: 1 }) as never)
+  on('turn.complete', () => ({ text: '' }))
+  await $.turn.complete({ answer: '', reason: 'answer' } as never)
+  const ui = await mountBand($)
+  expect(await ui.find({ text: /Saved: 12k session · 12k today/ })).toBeDefined()
+  expect(await ui.find({ text: /Codex 5h: 8%/ })).toBeDefined()
+})

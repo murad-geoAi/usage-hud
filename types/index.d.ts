@@ -88,6 +88,10 @@ declare module 'claude-code' {
       codexEffort: EffortName | null
       /** Codex's 5h and weekly limits as last read, null when none was found. */
       codexLimits: CodexLimits | null
+      /** Codex tokens delegated this session and today, from runs/ledger.jsonl; null when nothing is readable. */
+      savings: { session: number; today: number } | null
+      /** Which session the Saved line counts: its Claude Code ID (null = count from the first render). */
+      savingsScope: { id: string | null; since: number } | null
       autoConfig: { switchThreshold: number; downgradeEnabled: boolean; compactThreshold: number; fallbackEnabled: boolean }
       autoSwitched: boolean
       /** The user chose Claude by hand: autopilot keeps off Codex until the limit drops below 50%. */
