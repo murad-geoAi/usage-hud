@@ -439,8 +439,8 @@ export const prettyModel = (id: string): string =>
 // ---- donut ------------------------------------------------------------------
 
 const DEFAULT = 0x01000000 // the terminal's own colour
-const COLS = 10
-const ROWS = 5 // two pixels per row, so a 10x10 pixel grid
+const COLS = 6
+const ROWS = 3 // two pixels per row, so a 6x6 pixel grid
 
 // Own base64 encoder: bytes in, standard padded base64 out.
 const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
@@ -1140,7 +1140,7 @@ export const register: Register = on => {
       branch ? `⎇ ${branch.branch}${branch.dirty ? '*' : ''}` : '⎇ no repo',
     ].join(' · ')
 
-    let taskLine = 'no task list yet'
+    let taskLine: string | null = null
     if (t !== null) {
       const left = t.total - t.completed
       const avg = times.length > 0 ? times.reduce((a, b) => a + b, 0) / times.length : 0
@@ -1163,11 +1163,7 @@ export const register: Register = on => {
       ...(began > 0 ? [`⏱ ${uptime(began, now)}`] : []),
     ].join(' · ')
     const dayTurns = day?.turns ?? 0
-    const todayLine = [
-      money(day?.cost ?? null),
-      `${dayTurns} ${dayTurns === 1 ? 'turn' : 'turns'}`,
-      `◷ ${clockTime(now)}`,
-    ].join(' · ')
+    const todayLine = `${money(day?.cost ?? null)} · ${dayTurns} ${dayTurns === 1 ? 'turn' : 'turns'}`
 
     const controls = [
       { key: 'theme', name: 'Theme', value: themeName, onPress: () => setTheme($, nextTheme(themeName)) },
@@ -1215,10 +1211,7 @@ export const register: Register = on => {
             <Box key={r.kind} flexDirection="row" marginRight={i < rings.length - 1 ? 2 : 0}>
               <Raster key={`donut-${r.kind}`} columns={COLS} rows={ROWS} cells={donutCells(r.pct, th)} />
               <Box flexDirection="column" marginLeft={1}>
-                <Text bold>{r.label}</Text>
-                <Text color={r.pct === null ? 'gray' : hex(fillColor(r.pct, th))}>
-                  {r.pct === null ? 'no data' : `${Math.round(r.pct)}% used`}
-                </Text>
+                <Text bold color={r.pct === null ? 'gray' : hex(fillColor(r.pct, th))}>{r.label}</Text>
                 <Text dimColor>{r.note}</Text>
                 {r.kind === 'five_hour' && (
                   <Text>
@@ -1252,15 +1245,16 @@ export const register: Register = on => {
         </Box>
 
         <Box flexDirection="column" marginLeft={isWide ? 2 : 0} flexGrow={1}>
-          <Text dimColor bold>NOW</Text>
           <Text wrap="truncate-end">
             {name('model', 8)}
             {value(modelLine)}
           </Text>
-          <Text wrap="truncate-end">
-            {name('tasks', 8)}
-            {taskLine}
-          </Text>
+          {taskLine !== null && (
+            <Text wrap="truncate-end">
+              {name('tasks', 8)}
+              {taskLine}
+            </Text>
+          )}
           <Text wrap="truncate-end">
             {name('codex', 8)}
             <Text color={cxPeak === null ? undefined : hex(fillColor(cxPeak, th))} dimColor={cxLimits === null}>
@@ -1272,17 +1266,15 @@ export const register: Register = on => {
           <Text wrap="truncate-end">
             {name('session', 8)}
             {sessionLine}
-          </Text>
-          <Text wrap="truncate-end">
-            {name('today', 8)}
+            <Text dimColor>{'  │ today '}</Text>
             {todayLine}
           </Text>
         </Box>
 
-        <Box flexDirection={isWide ? 'column' : 'row'} flexWrap={isWide ? 'nowrap' : 'wrap'} marginLeft={isWide ? 2 : 0} paddingLeft={isWide ? 1 : 0}>
-          {isWide && <Text dimColor bold>CONTROLS</Text>}
+        {/* wide: two columns of three, so the controls are no taller than the rings; narrow: one wrapping row */}
+        <Box flexDirection="row" flexWrap="wrap" width={isWide ? 34 : undefined} marginLeft={isWide ? 2 : 0}>
           {controls.map(c => (
-            <Box key={c.key} marginRight={isWide ? 0 : 2}>
+            <Box key={c.key} width={isWide ? 17 : undefined} marginRight={isWide ? 0 : 2}>
               <Button key={c.key} label={`${c.name}: ${c.value}`} plain onPress={c.onPress}>
                 {name(c.name, 7)}
                 {value(c.value)}

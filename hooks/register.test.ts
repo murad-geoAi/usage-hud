@@ -215,10 +215,10 @@ test('model and effort cycling', () => {
   expect(modelButton('claude-haiku-5-5')).toBe('haiku 5.5')
 })
 
-test('donut encodes 10x5 cells of three u32 words', () => {
+test('donut encodes 6x3 cells of three u32 words', () => {
   for (const pct of [null, 0, 42, 100]) {
-    // 50 cells * 12 bytes = 600 bytes = 800 base64 characters
-    expect(donutCells(pct, THEMES.claude).length).toBe(800)
+    // 18 cells * 12 bytes = 216 bytes = 288 base64 characters
+    expect(donutCells(pct, THEMES.claude).length).toBe(288)
   }
 })
 
