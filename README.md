@@ -27,7 +27,7 @@ Click a control, or use the matching command:
 | Model | `auto → opus → sonnet → haiku` | `/usage-hud model <opus\|sonnet\|haiku\|auto>` |
 | Effort | `auto → low → medium → high → xhigh → max` | `/usage-hud effort <level\|auto>` |
 | Mode | permission modes | `/usage-hud mode [name]` |
-| Route | Codex delegation `auto → claude → codex` (writes `~/.claude/delegation/routing.json`) | |
+| Deleg. | How much Claude hands to Codex: `auto → off → prefer` (stored as `auto`/`claude`/`codex` in `~/.claude/delegation/routing.json`); prompts always go to Claude | |
 | Auto | autopilot on / off | `/usage-hud auto [on\|off\|status\|downgrade <on\|off>\|compact <50-99\|off>]` |
 
 `/usage-hud` alone hides or shows the HUD. `/usage-hud codex <model|effort|default>` sets the model and effort Claude passes to Codex when it delegates.

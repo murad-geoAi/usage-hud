@@ -159,6 +159,10 @@ export const isRoute = (x: unknown): x is RouteName => typeof x === 'string' && 
 
 export const nextRoute = (r: RouteName): RouteName => ROUTES[(ROUTES.indexOf(r) + 1) % ROUTES.length] ?? 'auto'
 
+// How much Claude hands to Codex, as the button shows it; prompts themselves always go to Claude.
+// routing.json keeps auto|claude|codex, which the delegation rules read.
+export const delegateLabel = (r: RouteName): string => ({ auto: 'auto', claude: 'off', codex: 'prefer' })[r]
+
 // The models this Codex account has run; null, the account default (gpt-6-astra here), closes the cycle.
 export const CODEX_MODELS = ['gpt-6-astra', 'gpt-6.1-sol', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'] as const
 const CODEX_MODEL_IDS: readonly string[] = CODEX_MODELS
@@ -295,14 +299,24 @@ export const windowPct = (w: CodexWindow | null, now: number): number | null =>
 export const measuredPct = (w: CodexWindow | null, now: number): number | null =>
   w === null || w.resetsAt <= now ? null : w.pct
 
-/** The NOW row for Codex: both windows, and when they were read. */
+/** A Codex reading older than this is stale: Codex may have been used since, so the row is drawn dim. */
+export const STALE_MS = 30 * 60000
+
+export const isStale = (limits: CodexLimits, now: number): boolean => now - limits.seenAt >= STALE_MS
+
+/** How old a reading is: "just now" under two minutes, else "18m old". */
+export const freshness = (seenAt: number, now: number): string =>
+  now - seenAt < 2 * 60000 ? 'just now' : `${shortSpan(now - seenAt)} old`
+
+/** The Codex row: both windows and how old the reading is. A window reset since the reading is unknown, not 0%. */
 export const codexLine = (limits: CodexLimits | null, now: number): string => {
   if (limits === null) return 'no data (use Codex once to see its limits)'
   const part = (label: string, w: CodexWindow | null) => {
-    const pct = windowPct(w, now)
+    if (w !== null && w.resetsAt <= now) return `${label} reset, unread`
+    const pct = measuredPct(w, now)
     return pct === null ? `${label} --` : `${label} ${bar(pct / 100, 4)} ${Math.round(pct)}%`
   }
-  return `${part('5h', limits.fiveHour)} · ${part('wk', limits.weekly)} · as of ${clockTime(limits.seenAt)}`
+  return `${part('5h', limits.fiveHour)} · ${part('wk', limits.weekly)} · ${freshness(limits.seenAt, now)}`
 }
 
 // ---- formatting -------------------------------------------------------------
@@ -709,7 +723,7 @@ const setRouting = async ($: EngineInterface, patch: Partial<Routing>, what: str
   }
 }
 
-const setRoute = ($: EngineInterface, r: RouteName) => setRouting($, { preference: r }, 'Route')
+const setRoute = ($: EngineInterface, r: RouteName) => setRouting($, { preference: r }, 'Delegate')
 const setCodexModel = ($: EngineInterface, id: string | null) => setRouting($, { codexModel: id }, 'Codex model')
 const setCodexEffort = ($: EngineInterface, level: EffortName | null) =>
   setRouting($, { codexEffort: level }, 'Codex effort')
@@ -1118,8 +1132,8 @@ export const register: Register = on => {
     const codexRing = (label: string, kind: string, w: CodexWindow | null) => ({
       label,
       kind,
-      pct: windowPct(w, now),
-      note: w === null ? 'no data' : resetsIn(new Date(w.resetsAt).toISOString(), now),
+      pct: measuredPct(w, now),
+      note: w === null ? 'no data' : w.resetsAt <= now ? 'reset, unread' : resetsIn(new Date(w.resetsAt).toISOString(), now),
       resetsAt: undefined,
     })
     if (e.props.bodyColumns >= 175 && cxLimits !== null) {
@@ -1127,7 +1141,8 @@ export const register: Register = on => {
     }
     const maxPct = Math.max(0, ...all.map(l => l.percentUsed))
     // the fuller Codex window colours its row
-    const cxPcts = cxLimits === null ? [] : [windowPct(cxLimits.fiveHour, now), windowPct(cxLimits.weekly, now)]
+    const cxPcts = cxLimits === null ? [] : [measuredPct(cxLimits.fiveHour, now), measuredPct(cxLimits.weekly, now)]
+    const cxStale = cxLimits === null || isStale(cxLimits, now)
     const cxKnown = cxPcts.filter((p): p is number => p !== null)
     const cxPeak = cxKnown.length === 0 ? null : Math.max(...cxKnown)
     const forecast = pace(trend, rings[0]?.resetsAt, now)
@@ -1189,7 +1204,7 @@ export const register: Register = on => {
         },
       },
       // Whether Claude may delegate to the Codex CLI; Claude's own model stays the Model control's.
-      { key: 'route', name: 'Route', value: routeName, onPress: () => setRoute($, nextRoute(routeName)) },
+      { key: 'route', name: 'Deleg.', value: delegateLabel(routeName), onPress: () => setRoute($, nextRoute(routeName)) },
       {
         key: 'autopilot',
         name: 'Auto',
@@ -1257,7 +1272,7 @@ export const register: Register = on => {
           )}
           <Text wrap="truncate-end">
             {name('codex', 8)}
-            <Text color={cxPeak === null ? undefined : hex(fillColor(cxPeak, th))} dimColor={cxLimits === null}>
+            <Text color={cxPeak === null || cxStale ? undefined : hex(fillColor(cxPeak, th))} dimColor={cxStale}>
               {codexLine(cxLimits, now)}
             </Text>
             <Text color={running ? hex(th.warn) : finished && finished.outcome !== 'ok' ? hex(th.bad) : undefined}>{workerNote}</Text>
