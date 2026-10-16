@@ -11,6 +11,8 @@ import {
   burnRate,
   clockTime,
   codexLine,
+  delegateLabel,
+  isStale,
   codexModelButton,
   contextNote,
   cycle,
@@ -215,10 +217,10 @@ test('model and effort cycling', () => {
   expect(modelButton('claude-haiku-5-5')).toBe('haiku 5.5')
 })
 
-test('donut encodes 10x5 cells of three u32 words', () => {
+test('donut encodes 6x3 cells of three u32 words', () => {
   for (const pct of [null, 0, 42, 100]) {
-    // 50 cells * 12 bytes = 600 bytes = 800 base64 characters
-    expect(donutCells(pct, THEMES.claude).length).toBe(800)
+    // 18 cells * 12 bytes = 216 bytes = 288 base64 characters
+    expect(donutCells(pct, THEMES.claude).length).toBe(288)
   }
 })
 
@@ -358,6 +360,13 @@ test('codex limits come from the last rollout line that has them', () => {
   const line = codexLine(found, 1792000000000)
   expect(line).toContain('5h ▱▱▱▱ 8%')
   expect(line).toContain('wk ▰▱▱▱ 26%')
+  // a window reset since the reading is unknown, not 0%; an old reading says how old
+  const later = codexLine({ ...found!, seenAt: 0, fiveHour: { pct: 90, resetsAt: 1000 } }, 45 * 60000)
+  expect(later).toContain('5h reset, unread')
+  expect(later).toContain('45m old')
+  expect(isStale({ ...found!, seenAt: 0 }, 45 * 60000)).toBe(true)
+  expect(delegateLabel('claude')).toBe('off')
+  expect(delegateLabel('codex')).toBe('prefer')
 })
 
 test('worker commands are recognised only at the start', () => {
@@ -389,7 +398,7 @@ test('the Route button cycles and writes routing.json, keeping its other keys', 
   const ui = await mountBand($)
   expect((await ui.find({ key: 'route' }))?.text).toContain('auto')
   await ui.press({ key: 'route' })
-  expect((await ui.find({ key: 'route' }))?.text).toContain('claude')
+  expect((await ui.find({ key: 'route' }))?.text).toContain('off')
   expect(JSON.parse(files[ROUTING] ?? '')).toEqual({ preference: 'claude', codexModel: null })
   await ui.press({ key: 'route' })
   expect(JSON.parse(files[ROUTING] ?? '').preference).toBe('codex')
