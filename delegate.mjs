@@ -7,7 +7,7 @@
 // Every run is appended to runs/ledger.jsonl (Codex's token usage vs. what Claude paid) for the Usage HUD.
 // Exit: 0 ok, 1 Codex failed, 2 bad call, 3 Codex near its limit.
 import { spawnSync } from 'node:child_process'
-import { appendFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { dirname, join, parse, relative, resolve } from 'node:path'
 
@@ -141,9 +141,26 @@ for (const line of (run.stdout ?? '').split('\n')) {
   } catch { /* not an event */ }
 }
 
+// The Usage HUD's "Saved" line reads this ledger. Every append also drops lines older than 30 days.
+const LEDGER = join(RUNS, 'ledger.jsonl')
+const KEEP_MS = 30 * 24 * 60 * 60 * 1000
+const taskName = (task.split('\n').find(l => l.trim().startsWith('[TASK]')) ?? '').replace(/^\s*\[TASK\]\s*/, '').trim().slice(0, 80) || 'unknown'
+const session = (process.env.CLAUDE_CODE_SESSION_ID ?? '').trim()
+
 const ledger = fields => {
   try {
-    appendFileSync(join(RUNS, 'ledger.jsonl'), JSON.stringify({ at: Date.now(), mode, cwd, ms, model, effort, codexTokens: usage, ...fields }) + '\n')
+    const now = Date.now()
+    const kept = existsSync(LEDGER)
+      ? readFileSync(LEDGER, 'utf8').split('\n').filter(line => {
+        try {
+          const e = JSON.parse(line)
+          return typeof e?.at === 'number' && now - e.at <= KEEP_MS
+        } catch { return false }
+      })
+      : []
+    const entry = { at: now, task: taskName, ...(session ? { session } : {}), mode, cwd, ms, model, effort, codexTokens: usage, ...fields }
+    mkdirSync(RUNS, { recursive: true })
+    writeFileSync(LEDGER, [...kept, JSON.stringify(entry)].join('\n') + '\n')
   } catch { /* measurement must never fail the run */ }
 }
 
