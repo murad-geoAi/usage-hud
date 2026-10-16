@@ -23,7 +23,11 @@ Size: [S] one file, clear change, < ~50 lines · [M] a few files · [L] design d
   - Test: `claude plugin validate .`
 
 ## Decisions
--
+- Codex plugin not installed: built in `--claude` mode (Mode line changed from split).
+- Feature arg was typed `specc-controls`; built `spec-controls` (the only matching spec).
+- `specMode` lives in `$.state` only (session), not persisted to the store.
+- Feature names limited to `[\w.-]+` and control chars stripped from task text (automated security review).
+- Codex plugin check uses a guarded read of installed_plugins.json instead of `fs.exists` (no host fake needed).
 
 ## Blocked
 -
